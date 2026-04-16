@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <AssemblyName>Mp3Gain2026</AssemblyName>
+    <RootNamespace>Mp3Gain2026</RootNamespace>
+    <Version>2026.1.0</Version>
+    <Authors>MP3Gain Contributors</Authors>
+    <Description>Modern MP3 volume normalization tool using ReplayGain analysis</Description>
+    <ApplicationIcon>mp3gain2026.ico</ApplicationIcon>
+  </PropertyGroup>
+
+
+  <!-- Native DLL for x86 -->
+  <ItemGroup Condition="Exists('runtimes\win-x86\native\mp3gain2026.dll')">
+    <Content Include="runtimes\win-x86\native\mp3gain2026.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes\win-x86\native\mp3gain2026.dll</Link>
+    </Content>
+  </ItemGroup>
+
+  <!-- Native DLL for x64 -->
+  <ItemGroup Condition="Exists('runtimes\win-x64\native\mp3gain2026.dll')">
+    <Content Include="runtimes\win-x64\native\mp3gain2026.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes\win-x64\native\mp3gain2026.dll</Link>
+    </Content>
+  </ItemGroup>
+
+
+  <!-- WinForms Designer support: link Designer.cs and .resx to their parent forms -->
+  <ItemGroup>
+    <Compile Update="MainForm.Designer.cs">
+      <DependentUpon>MainForm.cs</DependentUpon>
+      <DesignTimeSharedInput>True</DesignTimeSharedInput>
+    </Compile>
+    <EmbeddedResource Update="MainForm.resx">
+      <DependentUpon>MainForm.cs</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
+
+
+</Project>

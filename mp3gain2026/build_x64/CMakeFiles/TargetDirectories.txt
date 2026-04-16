@@ -1,0 +1,3 @@
+C:/My Experiments/2026/mp3gain/mp3gain2026/build_x64/CMakeFiles/mp3gain2026.dir
+C:/My Experiments/2026/mp3gain/mp3gain2026/build_x64/CMakeFiles/ALL_BUILD.dir
+C:/My Experiments/2026/mp3gain/mp3gain2026/build_x64/CMakeFiles/ZERO_CHECK.dir
