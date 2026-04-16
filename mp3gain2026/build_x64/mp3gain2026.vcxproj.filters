@@ -1,0 +1,63 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\gain_analysis.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mp3gain.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\apetag.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\id3tag.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\rg_error.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\common.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\dct64_i386.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\decode_i386.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\interface.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\layer1.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\layer2.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\layer3.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\legacy\mpglibDBL\tabinit.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\dllmain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\My Experiments\2026\mp3gain\mp3gain2026\mp3gain2026_api.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\My Experiments\2026\mp3gain\mp3gain2026\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\My Experiments\2026\mp3gain\mp3gain2026\mp3gain2026.def">
+      <Filter>Source Files</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{9EF791F6-7B8F-3F3C-8253-E6C7B36F9FF5}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

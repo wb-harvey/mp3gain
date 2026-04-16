@@ -1,0 +1,30 @@
+LIBRARY mp3gain2026
+
+EXPORTS
+    ; Library Lifecycle
+    MP3G_Init               @1
+    MP3G_Shutdown           @2
+    MP3G_GetVersion         @3
+
+    ; Single File Analysis
+    MP3G_AnalyzeFile        @10
+
+    ; Album Analysis
+    MP3G_AlbumInit          @20
+    MP3G_AlbumAnalyzeFile   @21
+    MP3G_AlbumGetResult     @22
+    MP3G_AlbumFinish        @23
+
+    ; Gain Modification
+    MP3G_ApplyGain          @30
+    MP3G_ApplyTrackGain     @31
+    MP3G_UndoGain           @32
+
+    ; Tag Operations
+    MP3G_ReadTags           @40
+    MP3G_WriteTags          @41
+    MP3G_RemoveTags         @42
+
+    ; Error / Progress
+    MP3G_GetLastError       @50
+    MP3G_SetProgressCallback @51
