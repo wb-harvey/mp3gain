@@ -13,6 +13,7 @@
     <Authors>MP3Gain Contributors</Authors>
     <Description>Modern MP3 volume normalization tool using ReplayGain analysis</Description>
     <ApplicationIcon>mp3gain2026.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
 
 

@@ -417,7 +417,7 @@ public partial class MainForm : Form
 			DecimalPlaces = 1,
 			Increment = 0.5m,
 			Width = 80,
-			Location = new Point(160, 7),
+			Location = new Point(220, 7),
 			BackColor = BgCard,
 			ForeColor = TextPrimary,
 			Font = new Font("Segoe UI", 10f, FontStyle.Bold),
@@ -432,7 +432,7 @@ public partial class MainForm : Form
 			LinkBehavior = LinkBehavior.HoverUnderline,
 			Font = new Font("Segoe UI", 8.5f),
 			AutoSize = true,
-			Location = new Point(260, 12)
+			Location = new Point(320, 12)
 		};
 		linkLabel.LinkClicked += delegate
 		{
