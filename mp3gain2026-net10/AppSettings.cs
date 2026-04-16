@@ -14,6 +14,7 @@ public class AppSettings
     public bool IgnoreTags { get; set; } = false;
     public bool RecalcTags { get; set; } = false;
     public bool BeepWhenFinished { get; set; } = false;
+    public bool LimitToSingleThread { get; set; } = false;
 
     public string ErrorLogPath { get; set; } = @"C:\ProgramData\Mp3Gain2026\error.log";
     public string AnalysisLogPath { get; set; } = @"C:\ProgramData\Mp3Gain2026\analysis.log";
