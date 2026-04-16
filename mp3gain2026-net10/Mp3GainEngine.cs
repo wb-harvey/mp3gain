@@ -7,71 +7,64 @@ namespace Mp3Gain2026;
 
 /// <summary>
 /// High-level managed wrapper around the mp3gain2026 native DLL.
-/// Provides async methods and type-safe results.
+/// Uses a pool of DLL instances for concurrent file processing.
 /// </summary>
 public sealed class Mp3GainEngine : IDisposable
 {
-    private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private readonly NativeEnginePool _pool;
     private bool _disposed;
-    private bool _initialized;
-
-    public event Action<int>? ProgressChanged;
-    private static NativeMethods.MP3G_ProgressCallback? _progressDelegate;
 
     public const double DefaultTargetDb = 89.0;
 
-    public Mp3GainEngine()
-    {
-        int result = NativeMethods.MP3G_Init();
-        if (result != NativeMethods.MP3G_OK)
-            throw new InvalidOperationException("Failed to initialize mp3gain2026 native library.");
-        _initialized = true;
+    /// <summary>Number of parallel analysis slots available.</summary>
+    public int Concurrency => _pool.PoolSize;
 
-        if (_progressDelegate == null)
-        {
-            _progressDelegate = OnNativeProgress;
-            NativeMethods.MP3G_SetProgressCallback(_progressDelegate, IntPtr.Zero);
-        }
+    public Mp3GainEngine(int concurrency = 0)
+    {
+        _pool = new NativeEnginePool(concurrency);
     }
 
-    private void OnNativeProgress(int percent, IntPtr userData)
-    {
-        ProgressChanged?.Invoke(percent);
-    }
-
-    public string GetVersion()
-    {
-        var sb = new StringBuilder(64);
-        NativeMethods.MP3G_GetVersion(sb, sb.Capacity);
-        return sb.ToString();
-    }
+    public string GetVersion() => _pool.GetVersion();
 
     /// <summary>
     /// Analyzes a single MP3 file for its ReplayGain values.
+    /// Multiple calls can execute concurrently — each gets its own DLL instance.
     /// </summary>
-    public async Task<AnalysisResult> AnalyzeFileAsync(string filePath, bool ignoreTags = false, bool recalcTags = false, CancellationToken ct = default)
+    public async Task<AnalysisResult> AnalyzeFileAsync(string filePath, bool ignoreTags = false, bool recalcTags = false, IProgress<int>? progress = null, CancellationToken ct = default)
     {
         ThrowIfDisposed();
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
 
         return await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
 
+                // Set up per-instance progress callback
+                NativeMethods.MP3G_ProgressCallback? progressDelegate = null;
+                if (progress != null)
+                {
+                    progressDelegate = (percent, _) => progress.Report(percent);
+                    inst.SetProgressCallback(progressDelegate, IntPtr.Zero);
+                }
+
                 var native = new NativeMethods.MP3G_AnalysisResult();
-                int ret = NativeMethods.MP3G_AnalyzeFile(filePath, ref native, ignoreTags ? 1 : 0, recalcTags ? 1 : 0);
+                int ret = inst.AnalyzeFile(filePath, ref native, ignoreTags ? 1 : 0, recalcTags ? 1 : 0);
 
                 if (ret != NativeMethods.MP3G_OK)
                 {
-                    string error = GetLastErrorMessage();
+                    string error = inst.GetLastErrorMessage();
                     throw new Mp3GainException(ret, error);
                 }
 
                 var tags = new NativeMethods.MP3G_TagInfo();
-                NativeMethods.MP3G_ReadTags(filePath, ref tags);
+                inst.ReadTags(filePath, ref tags);
+
+                // Clear the progress callback
+                if (progressDelegate != null)
+                    inst.SetProgressCallback(null!, IntPtr.Zero);
 
                 return new AnalysisResult
                 {
@@ -89,7 +82,7 @@ public sealed class Mp3GainEngine : IDisposable
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
     }
@@ -104,17 +97,17 @@ public sealed class Mp3GainEngine : IDisposable
 
         return await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
 
                 var native = new NativeMethods.MP3G_TagInfo();
-                int ret = NativeMethods.MP3G_ReadTags(filePath, ref native);
+                int ret = inst.ReadTags(filePath, ref native);
 
                 if (ret != NativeMethods.MP3G_OK)
                 {
-                    string error = GetLastErrorMessage();
+                    string error = inst.GetLastErrorMessage();
                     throw new Mp3GainException(ret, error);
                 }
 
@@ -137,7 +130,7 @@ public sealed class Mp3GainEngine : IDisposable
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
     }
@@ -153,19 +146,19 @@ public sealed class Mp3GainEngine : IDisposable
 
         await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
-                int ret = NativeMethods.MP3G_ApplyGain(filePath, gainChange,
+                int ret = inst.ApplyGain(filePath, gainChange,
                     preserveTimestamp ? 1 : 0);
 
                 if (ret != NativeMethods.MP3G_OK)
-                    throw new Mp3GainException(ret, GetLastErrorMessage());
+                    throw new Mp3GainException(ret, inst.GetLastErrorMessage());
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
     }
@@ -181,19 +174,19 @@ public sealed class Mp3GainEngine : IDisposable
 
         await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
-                int ret = NativeMethods.MP3G_ApplyTrackGain(filePath, targetDb,
+                int ret = inst.ApplyTrackGain(filePath, targetDb,
                     preserveTimestamp ? 1 : 0);
 
                 if (ret != NativeMethods.MP3G_OK)
-                    throw new Mp3GainException(ret, GetLastErrorMessage());
+                    throw new Mp3GainException(ret, inst.GetLastErrorMessage());
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
     }
@@ -209,19 +202,19 @@ public sealed class Mp3GainEngine : IDisposable
 
         await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
-                int ret = NativeMethods.MP3G_UndoGain(filePath,
+                int ret = inst.UndoGain(filePath,
                     preserveTimestamp ? 1 : 0);
 
                 if (ret != NativeMethods.MP3G_OK)
-                    throw new Mp3GainException(ret, GetLastErrorMessage());
+                    throw new Mp3GainException(ret, inst.GetLastErrorMessage());
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
     }
@@ -237,19 +230,19 @@ public sealed class Mp3GainEngine : IDisposable
 
         await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
-                int ret = NativeMethods.MP3G_RemoveTags(filePath,
+                int ret = inst.RemoveTags(filePath,
                     preserveTimestamp ? 1 : 0);
 
                 if (ret != NativeMethods.MP3G_OK)
-                    throw new Mp3GainException(ret, GetLastErrorMessage());
+                    throw new Mp3GainException(ret, inst.GetLastErrorMessage());
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
     }
@@ -265,7 +258,7 @@ public sealed class Mp3GainEngine : IDisposable
 
         await Task.Run(async () =>
         {
-            await _semaphore.WaitAsync(ct);
+            var inst = await _pool.RentAsync(ct);
             try
             {
                 ct.ThrowIfCancellationRequested();
@@ -284,24 +277,16 @@ public sealed class Mp3GainEngine : IDisposable
                 int undoLeft = fileInfo.UndoLeft;
                 int undoRight = fileInfo.UndoRight;
 
-                int ret = NativeMethods.MP3G_WriteTags(filePath, ref result, targetDb, haveUndo, undoLeft, undoRight, preserveTimestamp ? 1 : 0);
+                int ret = inst.WriteTags(filePath, ref result, targetDb, haveUndo, undoLeft, undoRight, preserveTimestamp ? 1 : 0);
 
                 if (ret != NativeMethods.MP3G_OK)
-                    throw new Mp3GainException(ret, GetLastErrorMessage());
+                    throw new Mp3GainException(ret, inst.GetLastErrorMessage());
             }
             finally
             {
-                _semaphore.Release();
+                _pool.Return(inst);
             }
         }, ct);
-    }
-
-    private string GetLastErrorMessage()
-    {
-        var sb = new StringBuilder(2048);
-        NativeMethods.MP3G_GetLastError(sb, sb.Capacity);
-        string msg = sb.ToString();
-        return string.IsNullOrEmpty(msg) ? "Unknown native error" : msg;
     }
 
     private void ThrowIfDisposed()
@@ -313,12 +298,7 @@ public sealed class Mp3GainEngine : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (_initialized)
-        {
-            NativeMethods.MP3G_Shutdown();
-            _initialized = false;
-        }
-        _semaphore.Dispose();
+        _pool.Dispose();
     }
 }
 

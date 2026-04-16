@@ -1,7 +1,7 @@
 /*
  *  ReplayGainAnalysis - analyzes input samples and give the recommended dB change
  *  Copyright (C) 2001-2009 David Robinson and Glen Sawyer
- *  Improvements and optimizations added by Frank Klemm, and by Marcel M�ller 
+ *  Improvements and optimizations added by Frank Klemm, and by Marcel Mueller
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -18,74 +18,9 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  *  concept and filter values by David Robinson (David@Robinson.org)
- *    -- blame him if you think the idea is flawed
  *  original coding by Glen Sawyer (mp3gain@hotmail.com)
- *    -- blame him if you think this runs too slowly, or the coding is otherwise flawed
+ *  lots of code improvements by Frank Klemm
  *
- *  lots of code improvements by Frank Klemm ( http://www.uni-jena.de/~pfk/mpp/ )
- *    -- credit him for all the _good_ programming ;)
- *
- *
- *  For an explanation of the concepts and the basic algorithms involved, go to:
- *    http://www.replaygain.org/
- */
-
-/*
- *  Here's the deal. Call
- *
- *    InitGainAnalysis ( long samplefreq );
- *
- *  to initialize everything. Call
- *
- *    AnalyzeSamples ( const Float_t*  left_samples,
- *                     const Float_t*  right_samples,
- *                     size_t          num_samples,
- *                     int             num_channels );
- *
- *  as many times as you want, with as many or as few samples as you want.
- *  If mono, pass the sample buffer in through left_samples, leave
- *  right_samples NULL, and make sure num_channels = 1.
- *
- *    GetTitleGain()
- *
- *  will return the recommended dB level change for all samples analyzed
- *  SINCE THE LAST TIME you called GetTitleGain() OR InitGainAnalysis().
- *
- *    GetAlbumGain()
- *
- *  will return the recommended dB level change for all samples analyzed
- *  since InitGainAnalysis() was called and finalized with GetTitleGain().
- *
- *  Pseudo-code to process an album:
- *
- *    Float_t       l_samples [4096];
- *    Float_t       r_samples [4096];
- *    size_t        num_samples;
- *    unsigned int  num_songs;
- *    unsigned int  i;
- *
- *    InitGainAnalysis ( 44100 );
- *    for ( i = 1; i <= num_songs; i++ ) {
- *        while ( ( num_samples = getSongSamples ( song[i], left_samples, right_samples ) ) > 0 )
- *            AnalyzeSamples ( left_samples, right_samples, num_samples, 2 );
- *        fprintf ("Recommended dB change for song %2d: %+6.2f dB\n", i, GetTitleGain() );
- *    }
- *    fprintf ("Recommended dB change for whole album: %+6.2f dB\n", GetAlbumGain() );
- */
-
-/*
- *  So here's the main source of potential code confusion:
- *
- *  The filters applied to the incoming samples are IIR filters,
- *  meaning they rely on up to <filter order> number of previous samples
- *  AND up to <filter order> number of previous filtered samples.
- *
- *  I set up the AnalyzeSamples routine to minimize memory usage and interface
- *  complexity. The speed isn't compromised too much (I don't think), but the
- *  internal complexity is higher than it should be for such a relatively
- *  simple routine.
- *
- *  Optimization/clarity suggestions are welcome.
  */
 
 #include <stdio.h>
@@ -104,29 +39,30 @@ typedef signed int      Int32_t;
 #define BUTTER_ORDER        2
 #define YULE_FILTER     filterYule
 #define BUTTER_FILTER   filterButter
-#define RMS_PERCENTILE      0.95        // percentile which is louder than the proposed level
-#define MAX_SAMP_FREQ   96000.          // maximum allowed sample frequency [Hz]
-#define RMS_WINDOW_TIME     0.050       // Time slice size [s]
-#define STEPS_per_dB      100.          // Table entries per dB
-#define MAX_dB            120.          // Table entries for 0...MAX_dB (normal max. values are 70...80 dB)
+#define RMS_PERCENTILE      0.95
+#define MAX_SAMP_FREQ   96000.
+#define RMS_WINDOW_TIME     0.050
+#define STEPS_per_dB      100.
+#define MAX_dB            120.
 
 #define MAX_ORDER               (BUTTER_ORDER > YULE_ORDER ? BUTTER_ORDER : YULE_ORDER)
-#define MAX_SAMPLES_PER_WINDOW  (size_t) (MAX_SAMP_FREQ * RMS_WINDOW_TIME + 1)      // max. Samples per Time slice
-#define PINK_REF                64.82 //298640883795                              // calibration value
+#define MAX_SAMPLES_PER_WINDOW  (size_t) (MAX_SAMP_FREQ * RMS_WINDOW_TIME + 1)
+#define PINK_REF                64.82
 
+/* ── Legacy global state (for backward-compat non-ctx functions) ── */
 Float_t          linprebuf [MAX_ORDER * 2];
-Float_t*         linpre;                                          // left input samples, with pre-buffer
+Float_t*         linpre;
 Float_t          lstepbuf  [MAX_SAMPLES_PER_WINDOW + MAX_ORDER];
-Float_t*         lstep;                                           // left "first step" (i.e. post first filter) samples
+Float_t*         lstep;
 Float_t          loutbuf   [MAX_SAMPLES_PER_WINDOW + MAX_ORDER];
-Float_t*         lout;                                            // left "out" (i.e. post second filter) samples
+Float_t*         lout;
 Float_t          rinprebuf [MAX_ORDER * 2];
-Float_t*         rinpre;                                          // right input samples ...
+Float_t*         rinpre;
 Float_t          rstepbuf  [MAX_SAMPLES_PER_WINDOW + MAX_ORDER];
 Float_t*         rstep;
 Float_t          routbuf   [MAX_SAMPLES_PER_WINDOW + MAX_ORDER];
 Float_t*         rout;
-long             sampleWindow;                                    // number of samples required to reach number of milliseconds required for RMS window
+long             sampleWindow;
 long             totsamp;
 double           lsum;
 double           rsum;
@@ -134,9 +70,6 @@ int              freqindex;
 int              first;
 static Uint32_t  A [(size_t)(STEPS_per_dB * MAX_dB)];
 static Uint32_t  B [(size_t)(STEPS_per_dB * MAX_dB)];
-
-// for each filter:
-// [0] 48 kHz, [1] 44.1 kHz, [2] 32 kHz, [3] 24 kHz, [4] 22050 Hz, [5] 16 kHz, [6] 12 kHz, [7] is 11025 Hz, [8] 8 kHz
 
 #ifdef WIN32
 #ifndef __GNUC__
@@ -174,24 +107,17 @@ static const Float_t ABButter[12][2*BUTTER_ORDER + 1] = {
     {0.94597685600279, -1.88903307939452, -1.89195371200558,  0.89487434461664,  0.94597685600279 }
 };
 
-
 #ifdef WIN32
 #ifndef __GNUC__
 #pragma warning ( default : 4305 )
 #endif
 #endif
 
-// When calling these filter procedures, make sure that ip[-order] and op[-order] point to real data!
-
-// If your compiler complains that "'operation on 'output' may be undefined", you can
-// either ignore the warnings or uncomment the three "y" lines (and comment out the indicated line)
-
 static void
 filterYule (const Float_t* input, Float_t* output, size_t nSamples, const Float_t* kernel)
 {
-
     while (nSamples--) {
-       *output =  1e-10  /* 1e-10 is a hack to avoid slowdown because of denormals */
+       *output =  1e-10
          + input [0]  * kernel[0]
          - output[-1] * kernel[1]
          + input [-1] * kernel[2]
@@ -220,10 +146,9 @@ filterYule (const Float_t* input, Float_t* output, size_t nSamples, const Float_
 
 static void
 filterButter (const Float_t* input, Float_t* output, size_t nSamples, const Float_t* kernel)
-{   
-
+{
     while (nSamples--) {
-        *output =  
+        *output =
            input [0]  * kernel[0]
          - output[-1] * kernel[1]
          + input [-1] * kernel[2]
@@ -234,14 +159,37 @@ filterButter (const Float_t* input, Float_t* output, size_t nSamples, const Floa
     }
 }
 
+static __inline double fsqr(const double d)
+{  return d*d;
+}
 
-// returns a INIT_GAIN_ANALYSIS_OK if successful, INIT_GAIN_ANALYSIS_ERROR if not
+static Float_t
+analyzeResult ( Uint32_t* Array, size_t len )
+{
+    Uint32_t  elems;
+    Int32_t   upper;
+    size_t    i;
+
+    elems = 0;
+    for ( i = 0; i < len; i++ )
+        elems += Array[i];
+    if ( elems == 0 )
+        return GAIN_NOT_ENOUGH_SAMPLES;
+
+    upper = (Int32_t) ceil (elems * (1. - RMS_PERCENTILE));
+    for ( i = len; i-- > 0; ) {
+        if ( (upper -= Array[i]) <= 0 )
+            break;
+    }
+
+    return (Float_t) ((Float_t)PINK_REF - (Float_t)i / (Float_t)STEPS_per_dB);
+}
+
 
 int
 ResetSampleFrequency ( long samplefreq ) {
     int  i;
 
-    // zero out initial values
     for ( i = 0; i < MAX_ORDER; i++ )
         linprebuf[i] = lstepbuf[i] = loutbuf[i] = rinprebuf[i] = rstepbuf[i] = routbuf[i] = 0.;
 
@@ -262,13 +210,10 @@ ResetSampleFrequency ( long samplefreq ) {
     }
 
     sampleWindow = (int) ceil (samplefreq * RMS_WINDOW_TIME);
-
     lsum         = 0.;
     rsum         = 0.;
     totsamp      = 0;
-
     memset ( A, 0, sizeof(A) );
-
     return INIT_GAIN_ANALYSIS_OK;
 }
 
@@ -289,12 +234,6 @@ InitGainAnalysis ( long samplefreq )
     memset ( B, 0, sizeof(B) );
 
     return INIT_GAIN_ANALYSIS_OK;
-}
-
-// returns GAIN_ANALYSIS_OK if successful, GAIN_ANALYSIS_ERROR if not
-
-static __inline double fsqr(const double d)
-{  return d*d;
 }
 
 int
@@ -347,7 +286,7 @@ AnalyzeSamples ( const Float_t* left_samples, const Float_t* right_samples, size
         BUTTER_FILTER ( lstep + totsamp, lout + totsamp, cursamples, ABButter[freqindex]);
         BUTTER_FILTER ( rstep + totsamp, rout + totsamp, cursamples, ABButter[freqindex]);
 
-        curleft = lout + totsamp;                   // Get the squared values
+        curleft = lout + totsamp;
         curright = rout + totsamp;
 
         i = cursamples % 16;
@@ -396,7 +335,7 @@ AnalyzeSamples ( const Float_t* left_samples, const Float_t* right_samples, size
         batchsamples -= cursamples;
         cursamplepos += cursamples;
         totsamp      += cursamples;
-        if ( totsamp == sampleWindow ) {  // Get the Root Mean Square (RMS) for this set of samples
+        if ( totsamp == sampleWindow ) {
             double  val  = STEPS_per_dB * 10. * log10 ( (lsum+rsum) / totsamp * 0.5 + 1.e-37 );
             int     ival = (int) val;
             if ( ival <                     0 ) ival = 0;
@@ -409,7 +348,7 @@ AnalyzeSamples ( const Float_t* left_samples, const Float_t* right_samples, size
             memmove ( rstepbuf, rstepbuf + totsamp, MAX_ORDER * sizeof(Float_t) );
             totsamp = 0;
         }
-        if ( totsamp > sampleWindow )   // somehow I really screwed up: Error in programming! Contact author about totsamp > sampleWindow
+        if ( totsamp > sampleWindow )
             return GAIN_ANALYSIS_ERROR;
     }
     if ( num_samples < MAX_ORDER ) {
@@ -424,29 +363,6 @@ AnalyzeSamples ( const Float_t* left_samples, const Float_t* right_samples, size
     }
 
     return GAIN_ANALYSIS_OK;
-}
-
-
-static Float_t
-analyzeResult ( Uint32_t* Array, size_t len )
-{
-    Uint32_t  elems;
-    Int32_t   upper;
-    size_t    i;
-
-    elems = 0;
-    for ( i = 0; i < len; i++ )
-        elems += Array[i];
-    if ( elems == 0 )
-        return GAIN_NOT_ENOUGH_SAMPLES;
-
-    upper = (Int32_t) ceil (elems * (1. - RMS_PERCENTILE));
-    for ( i = len; i-- > 0; ) {
-        if ( (upper -= Array[i]) <= 0 )
-            break;
-    }
-
-    return (Float_t) ((Float_t)PINK_REF - (Float_t)i / (Float_t)STEPS_per_dB);
 }
 
 
