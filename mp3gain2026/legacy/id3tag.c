@@ -274,12 +274,18 @@ static struct ID3v2FrameStruct * id3_make_frame(const char *frameid, const char 
 	va_end(ap);
 
 	frame = malloc(sizeof(struct ID3v2FrameStruct));
+	if (frame == NULL)
+		return NULL;
 	frame->next = NULL;
 	strncpy(frame->frameid, frameid, 4);
 	frame->flags = 0;
 	frame->len = k;
 	frame->hskip = 0;
-	frame->data = malloc(k);
+	frame->data = malloc(k > 0 ? k : 1);
+	if (frame->data == NULL) {
+		free(frame);
+		return NULL;
+	}
 
 	va_start(ap, format);
 	k = 0;
@@ -304,6 +310,8 @@ static struct ID3v2FrameStruct * id3_make_frame(const char *frameid, const char 
 				break;
 			default:
 				va_end(ap);
+				free(frame->data);
+				free(frame);
 				return NULL;
 		}
 	}
@@ -543,8 +551,8 @@ static int id3_parse_v2_tag(FILE *f, struct ID3v2TagStruct *tag)
 	DBG(("  version=%04x length=%lu flags=%02x\n", tag->version, tag->length, tag->flags));
 
 	/* Read rest of the tag. */
-	tagdata = malloc(dlen);
-	if (fread(tagdata, 1, dlen, f) != dlen)
+	tagdata = malloc(dlen > 0 ? dlen : 1);
+	if (tagdata == NULL || fread(tagdata, 1, dlen, f) != dlen)
 		goto badtag;
 
 	/* If this is an unsynced v2.2 or v2.3 tag, decode it now. */
@@ -581,7 +589,7 @@ static int id3_parse_v2_tag(FILE *f, struct ID3v2TagStruct *tag)
 		switch (tag->version >> 8) {
 
 			case 2: /* ID3v2.2 */
-				if (p + 5 > dlen)
+				if (p + 6 > dlen)
 					goto badtag;
 				memset(frameid, 0, 4);
 				for (k = 0; upgrade_id3v22_table[k].id_new[0]; k++) {
@@ -679,23 +687,31 @@ static int id3_parse_v2_tag(FILE *f, struct ID3v2TagStruct *tag)
 
 		/* Allocate frame structure. */
 		frame = malloc(sizeof(struct ID3v2FrameStruct));
+		if (frame == NULL)
+			goto badtag;
 		frame->next = NULL;
 		memcpy(frame->frameid, frameid, 4);
 		frame->flags = fflags;
 		frame->hskip = fhskip;
+		frame->data = NULL;
+		frame->len = 0;
 		*pframe = frame;
 		pframe = &(frame->next);
 
 		/* Copy frame data. */
 		if ((tag->version >> 8) == 4 && (fflags & FRAMEFL_UNSYNC) != 0) {
 			/* This frame is unsynchronized; decode it now. */
-			frame->data = malloc(flen);
+			frame->data = malloc(flen > 0 ? flen : 1);
+			if (frame->data == NULL)
+				goto badtag;
 			k = id3_get_unsync_data(frame->data, tagdata + p, flen);
 			frame->len = k;
 			p += flen;
 		} else if ((tag->version >> 8) == 2 && memcmp(frameid, "APIC", 4) == 0) {
 			/* APIC frame format differs from PIC frame format */
 			frame->data = malloc(flen + 12);
+			if (frame->data == NULL)
+				goto badtag;
 			frame->data[0] = tagdata[p];
 			k = 1;
 			if (memcmp(tagdata + p + 1, "PNG", 3) == 0) {
@@ -714,7 +730,9 @@ static int id3_parse_v2_tag(FILE *f, struct ID3v2TagStruct *tag)
 			p += flen;
 		} else {
 			/* Normal case, just copy the data. */
-			frame->data = malloc(flen);
+			frame->data = malloc(flen > 0 ? flen : 1);
+			if (frame->data == NULL)
+				goto badtag;
 			memcpy(frame->data, tagdata + p, flen);
 			frame->len = flen;
 			p += flen;
@@ -852,6 +870,11 @@ static int id3_parse_v1_tag(FILE *f, struct ID3v2TagStruct *tag)
 		memcpy(sbuf, buf + 3, 30);
 		sbuf[30] = '\0';
 		*pframe = id3_make_frame("TIT2", "bs", 0, sbuf);
+		if (*pframe == NULL) {
+			id3_release_frames(tag->frames);
+			tag->frames = NULL;
+			return M3G_ERR_TAGFORMAT;
+		}
 		pframe = &((*pframe)->next);
 	}
 
@@ -860,6 +883,11 @@ static int id3_parse_v1_tag(FILE *f, struct ID3v2TagStruct *tag)
 		memcpy(sbuf, buf + 33, 30);
 		sbuf[30] = '\0';
 		*pframe = id3_make_frame("TPE1", "bs", 0, sbuf);
+		if (*pframe == NULL) {
+			id3_release_frames(tag->frames);
+			tag->frames = NULL;
+			return M3G_ERR_TAGFORMAT;
+		}
 		pframe = &((*pframe)->next);
 	}
 
@@ -868,6 +896,11 @@ static int id3_parse_v1_tag(FILE *f, struct ID3v2TagStruct *tag)
 		memcpy(sbuf, buf + 63, 30);
 		sbuf[30] = '\0';
 		*pframe = id3_make_frame("TALB", "bs", 0, sbuf);
+		if (*pframe == NULL) {
+			id3_release_frames(tag->frames);
+			tag->frames = NULL;
+			return M3G_ERR_TAGFORMAT;
+		}
 		pframe = &((*pframe)->next);
 	}
 
@@ -879,6 +912,11 @@ static int id3_parse_v1_tag(FILE *f, struct ID3v2TagStruct *tag)
 		memcpy(sbuf, buf + 93, 4);
 		sbuf[4] = '\0';
 		*pframe = id3_make_frame("TDRC", "bs", 0, sbuf);
+		if (*pframe == NULL) {
+			id3_release_frames(tag->frames);
+			tag->frames = NULL;
+			return M3G_ERR_TAGFORMAT;
+		}
 		pframe = &((*pframe)->next);
 	}
 
@@ -888,6 +926,11 @@ static int id3_parse_v1_tag(FILE *f, struct ID3v2TagStruct *tag)
 		sbuf[30] = '\0';
 		/* assume ISO-8859-1, unknown language, no description */
 		*pframe = id3_make_frame("COMM", "bssbs", 0, "XXX", "", 0, sbuf);
+		if (*pframe == NULL) {
+			id3_release_frames(tag->frames);
+			tag->frames = NULL;
+			return M3G_ERR_TAGFORMAT;
+		}
 		pframe = &((*pframe)->next);
 	}
 
@@ -895,6 +938,11 @@ static int id3_parse_v1_tag(FILE *f, struct ID3v2TagStruct *tag)
 	if (buf[125] == '\0' && buf[126] != 0) {
 		sprintf(sbuf, "%u", buf[126]);
 		*pframe = id3_make_frame("TRCK", "bs", 0, sbuf);
+		if (*pframe == NULL) {
+			id3_release_frames(tag->frames);
+			tag->frames = NULL;
+			return M3G_ERR_TAGFORMAT;
+		}
 		pframe = &((*pframe)->next);
 	}
 
@@ -1026,6 +1074,8 @@ static int id3_copy_data(FILE *inf, FILE *outf, long offset, long count)
 
 	ret = 1;
 	buf = malloc(bufsize);
+	if (buf == NULL)
+		return M3G_ERR_WRITE;
 
 	if (fseek(inf, offset, SEEK_SET))
 		ret = M3G_ERR_READ;
@@ -1164,12 +1214,16 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 	if (info->haveTrackGain) {
 		need_update = 1;
 		frame = id3_make_rva2_frame(0, info->trackGain, info->haveTrackPeak, info->trackPeak);
+		if (frame == NULL)
+			goto noframe;
 		*pframe = frame;
 		pframe = &(frame->next);
 	}
 	if (info->haveAlbumGain) {
 		need_update = 1;
 		frame = id3_make_rva2_frame(1, info->albumGain, info->haveAlbumPeak, info->albumPeak);
+		if (frame == NULL)
+			goto noframe;
 		*pframe = frame;
 		pframe = &(frame->next);
 	}
@@ -1179,6 +1233,8 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 		need_update = 1;
 		sprintf(sbuf, "%03d,%03d", info->minGain, info->maxGain);
 		frame = id3_make_frame("TXXX", "bsbs", 0, "MP3GAIN_MINMAX", 0, sbuf);
+		if (frame == NULL)
+			goto noframe;
 		*pframe = frame;
 		pframe = &(frame->next);
 	}
@@ -1186,6 +1242,8 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 		need_update = 1;
 		sprintf(sbuf, "%03d,%03d", info->albumMinGain, info->albumMaxGain);
 		frame = id3_make_frame("TXXX", "bsbs", 0, "MP3GAIN_ALBUM_MINMAX", 0, sbuf);
+		if (frame == NULL)
+			goto noframe;
 		*pframe = frame;
 		pframe = &(frame->next);
 	}
@@ -1193,6 +1251,8 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 		need_update = 1;
 		sprintf(sbuf, "%+04d,%+04d,%c", info->undoLeft, info->undoRight, info->undoWrap ? 'W' : 'N');
 		frame = id3_make_frame("TXXX", "bsbs", 0, "MP3GAIN_UNDO", 0, sbuf);
+		if (frame == NULL)
+			goto noframe;
 		*pframe = frame;
 		pframe = &(frame->next);
 	}
@@ -1206,6 +1266,11 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 
 	/* Create temporary file. */
 	tmpfilename = malloc(strlen(filename) + 5);
+	if (tmpfilename == NULL) {
+		fclose(f);
+		id3_release_frames(tag.frames);
+		return M3G_ERR_CANT_MAKE_TMP;
+	}
 	strcpy(tmpfilename, filename);
 	strcat(tmpfilename, ".TMP");
 	outf = fopen(tmpfilename, "wb");
@@ -1234,7 +1299,9 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 		}
 	}
 
-	fclose(outf);
+	/* fclose flushes the last buffer: a failure there (disk full, network share gone) is a failed write */
+	if (fclose(outf) != 0 && ret >= 0)
+		ret = M3G_ERR_WRITE;
 	fclose(f);
 	id3_release_frames(tag.frames);
 
@@ -1254,23 +1321,12 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 		return ret;
 	}
 
-	/* Replace original file. */
-#ifdef WIN32
-	/* "rename" function in WIN32 does _not_ replace existing destination file, so
-	   we have to manually remove it first */
-	if (remove(filename) != 0) {
-		passError(MP3GAIN_UNSPECIFED_ERROR, 5, "Can not rename ", tmpfilename, " to ", filename, "\n");
-		ret = M3G_ERR_RENAME_TMP;
-		/* Do NOT remove the temp file itself, just in case the "remove(filename)" function
-		   only _temporarily_ failed, and the original file will disappear soon, such as when
-		   all handles on the file are closed. If it does disappear and we also
-		   delete the tmp file, then the file is completely gone... */
-		free(tmpfilename);
-	}
-#endif
-
+	/* Replace original file. One replacing move: the old remove-then-rename freed the temp name and
+	   then used it when the remove failed, and deleted the only complete copy when the rename failed
+	   after the remove had worked. A failed replace leaves the original untouched, so the temp copy
+	   can go. */
 	ret = 1;
-	if (rename(tmpfilename, filename)) {
+	if (u8_replace(tmpfilename, filename)) {
 		remove(tmpfilename);
 		passError(MP3GAIN_UNSPECIFED_ERROR, 5, "Can not rename ", tmpfilename, " to ", filename, "\n");
 		ret = M3G_ERR_RENAME_TMP;
@@ -1282,6 +1338,13 @@ int WriteMP3GainID3Tag(char *filename, struct MP3GainTagInfo *info, int saveTime
 	free(tmpfilename);
 
 	return ret;
+
+noframe:
+	/* Out of memory building the new frames; nothing has been written */
+	passError(MP3GAIN_UNSPECIFED_ERROR, 3, "Out of memory writing the tag of ", filename, "\n");
+	fclose(f);
+	id3_release_frames(tag.frames);
+	return M3G_ERR_CANT_MODIFY_FILE;
 }
 
 

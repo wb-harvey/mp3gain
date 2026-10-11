@@ -49,7 +49,8 @@ void DoError( char * localerrstr, MMRESULT localerrnum )
 		mp3gainerrstr = NULL;
 	}
     mp3gainerrstr = malloc(strlen(localerrstr) + 1);
-    strcpy(mp3gainerrstr,localerrstr);
+    if (mp3gainerrstr != NULL)
+        strcpy(mp3gainerrstr,localerrstr);
 	if  ( (apphandle != 0) && ( apperrmsg != 0 ) )
 	{
 		SendMessage(apphandle, apperrmsg, localerrnum, (LPARAM) localerrstr);

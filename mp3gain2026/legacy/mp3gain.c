@@ -100,6 +100,12 @@ struct MP3GainTagInfo *globalTagInfoHack = NULL;
 #include "mp3gain.h"  /*jzitt*/
 #include "utf8_io.h"  /* Unicode file names (after the system headers) */
 
+#ifdef asWIN32DLL
+/* The DLL runs inside the caller's process: the command-line tool's console text went to the host's
+   stdout/stderr. Errors still reach the caller through passError. */
+#define fprintf(...) 0
+#endif
+
 
 #define HEADERSIZE 4
 
@@ -142,6 +148,13 @@ int BadLayer = 0;
 int LayerSet = 0;
 int Reckless = 0;
 int wrapGain = 0;
+/* File offset where the trailing tags (APE, Lyrics3, ID3v1) start, 0 when unknown. Frame scanning stops
+   there: a byte pattern inside a tag (cover art in an APE tag, say) that looks like an MP3 frame was
+   "analyzed" and had its "gain" changed, corrupting the tag. Set only around one file's scan. */
+long mp3gain_audioEnd = 0;
+#define FRAME_SIDEINFO_MAX 38 /* 4-byte header, 2-byte CRC, 32 bytes of side info: what changeGain touches */
+#define CURFRAME_POS() ((long)filepos - (long)(inbuffer - (curframe - buffer)))
+#define PAST_AUDIO_END() (mp3gain_audioEnd > 0 && CURFRAME_POS() + FRAME_SIDEINFO_MAX > mp3gain_audioEnd)
 int undoChanges = 0;
 
 int skipTag = 0;
@@ -357,6 +370,10 @@ void passError(MMRESULT lerrnum, int numStrings, ...)
     va_end(marker);
 
     errstr = (char *)malloc(totalStrLen + 3);
+    if (errstr == NULL) {
+        DoError("Out of memory\n", lerrnum);
+        return;
+    }
     errstr[0] = '\0';
 
     va_start(marker, numStrings);
@@ -762,36 +779,34 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
   
   gFilesize = getSizeOfFile(filename);
 
+  outf = NULL;
   if (UsingTemp) {
 	  fflush(stderr);
 	  fflush(stdout);
  	  outlength = (long)strlen(filename);
  	  outfilename = (char *)malloc(outlength+5);
+	  if (outfilename == NULL) {
+		  NowWriting = 0;
+		  return M3G_ERR_CANT_MAKE_TMP;
+	  }
 	  strcpy(outfilename,filename);
- 	  if ((filename[outlength-3] == 'T' || filename[outlength-3] == 't') &&
- 			(filename[outlength-2] == 'M' || filename[outlength-2] == 'm') &&
- 			(filename[outlength-1] == 'P' || filename[outlength-1] == 'p')) {
- 		  strcat(outfilename,".TMP");
- 	  }
- 	  else {
- 		  outfilename[outlength-3] = 'T';
- 		  outfilename[outlength-2] = 'M';
- 		  outfilename[outlength-1] = 'P';
- 	  }
+	  strcat(outfilename,".TMP");
 
       inf = fopen(filename,"r+b");
 
 	  if (inf != NULL) {
 	    outf = fopen(outfilename, "wb");
-		
+
 		if (outf == NULL) {
-		        fclose(inf); 
+		        fclose(inf);
 			inf = NULL;
             passError(MP3GAIN_UNSPECIFED_ERROR, 3,
                 "\nCan't open ", outfilename, " for temp writing\n");
+			free(outfilename);
+			NowWriting = 0;
 			return M3G_ERR_CANT_MAKE_TMP;
-		} 
- 
+		}
+
 	  }
   }
   else {
@@ -803,6 +818,8 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
 		  fclose(outf);
 	  passError( MP3GAIN_UNSPECIFED_ERROR, 3,
           "\nCan't open ", filename, " for modifying\n");
+	  free(outfilename);
+	  NowWriting = 0;
 	  return M3G_ERR_CANT_MODIFY_FILE;
   }
   else {
@@ -815,9 +832,12 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
 
 		wrdpntr = buffer;
 
+		/* A tag that runs past the end of the file leaves no audio: its result was overwritten, and
+		   the frame search then ran over whatever the buffer held */
 		ok = skipID3v2();
 
-		ok = frameSearch(!0);
+		if (ok)
+			ok = frameSearch(!0);
 		if (!ok) {
             if (!BadLayer)
 				passError( MP3GAIN_UNSPECIFED_ERROR, 3,
@@ -869,6 +889,8 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
 #else
 		while (ok) {
 #endif
+			if (PAST_AUDIO_END())
+				break; /* the rest is the trailing tags */
 			bitridx = (curframe[2] >> 4) & 0x0F;
 			if (singlechannel) {
 				if ((curframe[3] >> 6) & 0x01) { /* if mode is NOT stereo or dual channel */
@@ -1066,33 +1088,32 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
            fprintf(stderr, "can't preserve attributes for '%s': %s\n", filename, strerror(errno));
        } while (0);
 #endif
-		fclose(outf);
+		if (fclose(outf) != 0)
+			outlength = -1; /* the last buffer didn't reach the disk */
+		outf = NULL;
 		fclose(inf);
 		inf = NULL;
-        
+
         if (outlength != inlength) {
             deleteFile(outfilename);
 			passError( MP3GAIN_UNSPECIFED_ERROR, 3,
-                "Not enough temp space on disk to modify ", filename, 
+                "Not enough temp space on disk to modify ", filename,
                 "\nEither free some space, or do not use \"temp file\" option\n");
+			free(outfilename);
+			NowWriting = 0;
             return M3G_ERR_NOT_ENOUGH_TMP_SPACE;
         }
         else {
-
-		    if (deleteFile(filename)) {
-				deleteFile(outfilename); //try to delete tmp file
+			/* One replacing move (was: delete the original, then rename, which lost the file when the
+			   rename failed). A failed replace leaves the original untouched, so the copy can go. */
+		    if (u8_replace(outfilename, filename)) {
+				deleteFile(outfilename);
 				passError( MP3GAIN_UNSPECIFED_ERROR, 3,
-                    "Can't open ", filename, " for modifying\n");
-			    return M3G_ERR_CANT_MODIFY_FILE;
-		    }
-		    if (moveFile(outfilename, filename)) {
-				passError( MP3GAIN_UNSPECIFED_ERROR, 9,
-                    "Problem re-naming ", outfilename, " to ", filename, 
-                    "\nThe mp3 was correctly modified, but you will need to re-name ", 
-                    outfilename, " to ", filename, 
-                    " yourself.\n");
+                    "Can't replace ", filename, " with the modified copy\n");
+				free(outfilename);
+				NowWriting = 0;
 			    return M3G_ERR_RENAME_TMP;
-		    };
+		    }
 		    if (saveTime)
 		       fileTime(filename, setStoredTime);
         }
@@ -1171,7 +1192,10 @@ int changeGainAndTag(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgai
 	int result = 0;
 
 	if (leftgainchange != 0 || rightgainchange != 0) {
-		if ((result = changeGain(filename AACGAIN_ARG(aacH), leftgainchange, rightgainchange)) == 0) {
+		mp3gain_audioEnd = (fileTag != NULL) ? fileTag->tagOffset : 0;
+		result = changeGain(filename AACGAIN_ARG(aacH), leftgainchange, rightgainchange);
+		mp3gain_audioEnd = 0;
+		if (result == 0) {
 			if (!tag->haveUndo) {
 				tag->undoLeft = 0;
 				tag->undoRight = 0;
@@ -1270,6 +1294,7 @@ int showVersion(char *progname) {
 #else
 	fprintf(stderr,"%s version %s\n",progname,MP3GAIN_VERSION);
 #endif
+	return 0;
 }
 
 
@@ -1311,7 +1336,6 @@ void wrapExplanation() {
     fprintf(stderr,"The \"%cw\" switch is not supported for AAC files. An attempt to wrap\n",SWITCH_CHAR);
     fprintf(stderr,"an AAC file is treated as an error, and the file will not be modified.\n");
 #endif
-    return 0;
 
 }
 
@@ -1814,6 +1838,7 @@ int mp3gain_main(int argc, char **argv) {
       fileTags[mainloop].apeTag = NULL;
 	  fileTags[mainloop].lyrics3tag = NULL;
 	  fileTags[mainloop].id31tag = NULL;
+	  fileTags[mainloop].tagOffset = 0; /* no limit unless the tags are read */
 	  tagInfo[mainloop].dirty = 0;
 	  tagInfo[mainloop].haveAlbumGain = 0;
 	  tagInfo[mainloop].haveAlbumPeak = 0;
@@ -2216,10 +2241,12 @@ int mp3gain_main(int argc, char **argv) {
 				if (tagInfo[mainloop].recalc > 0) {
 #endif
 					wrdpntr = buffer;
+					mp3gain_audioEnd = fileTags[mainloop].tagOffset;
 
 					ok = skipID3v2();
 
-					ok = frameSearch(!0);
+					if (ok)
+						ok = frameSearch(!0);
 				}
 				
 #ifdef AACGAIN
@@ -2306,6 +2333,8 @@ int mp3gain_main(int argc, char **argv) {
 						}
 					
 						while (ok) {
+							if (PAST_AUDIO_END())
+								break; /* the rest is the trailing tags (same limit as changeGain) */
 							bitridx = (curframe[2] >> 4) & 0x0F;
 							if (bitridx == 0) {
 								fprintf(stdout,"%s is free format (not currently supported)\n",curfilename);
@@ -2364,7 +2393,8 @@ int mp3gain_main(int argc, char **argv) {
 									}
 									if (decodeSuccess == MP3_OK) {
 										if ((!maxAmpOnly)&&(tagInfo[mainloop].recalc & FULL_RECALC)) {
-											if (AnalyzeSamples(lsamples,rsamples,procSamp/nchan,nchan) == GAIN_ANALYSIS_ERROR) {
+											if (AnalyzeSamples(lsamples,rsamples,
+													(procSamp/nchan > 1152) ? 1152 : procSamp/nchan,nchan) == GAIN_ANALYSIS_ERROR) {
 												fprintf(stderr,"Error analyzing further samples (max time reached)          \n");
 												analysisError = !0;
 												ok = 0;
@@ -2391,6 +2421,7 @@ int mp3gain_main(int argc, char **argv) {
 					if (!QuietMode)
 					fprintf(stderr,"                                                 \r");
 
+					mp3gain_audioEnd = 0;
 					if (tagInfo[mainloop].recalc & FULL_RECALC) {
 						if (maxAmpOnly)
 							dBchange = 0;
@@ -2694,6 +2725,7 @@ int mp3gain_main(int argc, char **argv) {
 	   and unreadable or non-MP3 files leave one of these unset) */
 	mp3gain_lastFileOk = argc > fileStart && fileok[argc - 1] && tagInfo[argc - 1].haveTrackGain;
 mainCleanup:
+	mp3gain_audioEnd = 0;
     free(tagInfo);
 	/* now stored in tagInfo--- free(maxsample); */
 	free(fileok);

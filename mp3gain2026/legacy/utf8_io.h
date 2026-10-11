@@ -30,6 +30,8 @@ FILE* u8_fopen(const char* path, const char* mode);
 int   u8_open(const char* path, int flags);
 int   u8_remove(const char* path);
 int   u8_rename(const char* from, const char* to);
+/* Moves 'from' over 'to', replacing it in one step (0 on success). On failure 'to' is untouched. */
+int   u8_replace(const char* from, const char* to);
 
 #ifdef __cplusplus
 }
@@ -41,6 +43,11 @@ int   u8_rename(const char* from, const char* to);
 #define remove(path)       u8_remove(path)
 #define rename(from, to)   u8_rename(from, to)
 #endif
+
+#else /* !WIN32 */
+
+#include <stdio.h>
+#define u8_replace(from, to) rename(from, to)
 
 #endif /* WIN32 */
 

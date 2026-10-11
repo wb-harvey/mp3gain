@@ -86,6 +86,7 @@ static int ReadMP3Lyrics3v2Tag ( FILE *fp, unsigned char **tagbuff, unsigned lon
 	if (*id3tagbuff)
 		free(*id3tagbuff);
 	*id3tagbuff = (unsigned char *)malloc(128);
+	if (*id3tagbuff == NULL) return 0;
     memcpy(*id3tagbuff,tmpid3,128);
     if ( fseek (fp, *tag_offset - 128 - sizeof (T), SEEK_SET) ) return 0;
     if ( fread (&T, 1, sizeof (T), fp) != sizeof (T) ) return 0;
@@ -97,14 +98,21 @@ static int ReadMP3Lyrics3v2Tag ( FILE *fp, unsigned char **tagbuff, unsigned lon
     if ( memcmp (tmp, "LYRICSBEGIN", 11) ) return 0;
     
     taglen = 128 + Lyrics3GetNumber6(T.Length) + sizeof(T);
-    
-    *tag_offset -= taglen;
-    if (*tagbuff != NULL) {
-        free(*tagbuff);
+    if (taglen > *tag_offset) return 0; /* claims to be bigger than the file */
+
+    {
+        unsigned char *newbuff = (unsigned char *)malloc(taglen);
+        if (newbuff == NULL) return 0;
+        if (fseek(fp, *tag_offset - taglen, SEEK_SET) || fread(newbuff, 1, taglen, fp) != (size_t)taglen) {
+            free(newbuff);
+            return 0;
+        }
+        *tag_offset -= taglen;
+        if (*tagbuff != NULL) {
+            free(*tagbuff);
+        }
+        *tagbuff = newbuff;
     }
-    *tagbuff = (unsigned char *)malloc(taglen);
-    fseek(fp,*tag_offset,SEEK_SET);
-    fread(*tagbuff,1,taglen,fp);
 	*tagSize = taglen;
     return 1;
 }
@@ -130,8 +138,25 @@ static void Write_LE_Uint32 ( char* p, const unsigned long value )
 }
 
 enum {
-	MAX_FIELD_SIZE = 1024*1024 //treat bigger fields as errors
+	MAX_FIELD_SIZE = 1024*1024, //treat bigger fields as errors
+	MAX_TAG_SIZE = 64*1024*1024 //a whole APE tag bigger than this is treated as damaged
 };
+
+/* Parses "min,max" (two gain values 0-255); 0 when the value isn't in that form */
+static int ParseMinMax(const char *value, int *mn, int *mx)
+{
+	char *endp;
+	long a = strtol(value, &endp, 10);
+	if (endp == value || *endp != ',') return 0;
+	{
+		const char *second = endp + 1;
+		long b = strtol(second, &endp, 10);
+		if (endp == second || a < 0 || a > 255 || b < 0 || b > 255) return 0;
+		*mn = (int)a;
+		*mx = (int)b;
+	}
+	return 1;
+}
 
 unsigned long strlen_max(const char * ptr, unsigned long max) {
 	unsigned long n = 0;
@@ -168,8 +193,12 @@ int ReadMP3APETag ( FILE *fp,  struct MP3GainTagInfo *info, struct APETagStruct 
     Ver = Read_LE_Uint32 (T.Version);
     if ( (Ver != 1000) && (Ver != 2000) ) return 0;
     if ( (TagLen = Read_LE_Uint32 (T.Length)) < sizeof (T) ) return 0;
+    /* The length comes from the file: it must fit before the footer, and stay sane (a damaged
+       footer claiming gigabytes made the allocation below fail, and the NULL buffer was then used) */
+    if ( TagLen > (unsigned long)*tag_offset || TagLen > MAX_TAG_SIZE ) return 0;
     if ( fseek (fp, *tag_offset - TagLen, SEEK_SET) ) return 0;
     buff = (char *)malloc (TagLen);
+    if (buff == NULL) return 0;
     if ( fread (buff, 1, TagLen - sizeof (T), fp) != (TagLen - sizeof (T)) ) {
         free (buff);
         return 0;
@@ -179,10 +208,21 @@ int ReadMP3APETag ( FILE *fp,  struct MP3GainTagInfo *info, struct APETagStruct 
         if ((*apeTag)->otherFields)
             free((*apeTag)->otherFields);
 		free(*apeTag);
+		*apeTag = NULL;
     }
 	*apeTag = (struct APETagStruct *)malloc(sizeof(struct APETagStruct));
+	if (*apeTag == NULL) {
+		free(buff);
+		return 0;
+	}
 	(*apeTag)->haveHeader = 0;
-	(*apeTag)->otherFields = (unsigned char *)malloc(TagLen - sizeof(T));
+	(*apeTag)->otherFields = (unsigned char *)malloc(TagLen - sizeof(T) + 1);
+	if ((*apeTag)->otherFields == NULL) {
+		free(*apeTag);
+		*apeTag = NULL;
+		free(buff);
+		return 0;
+	}
     (*apeTag)->otherFieldsSize = 0;
 
 	memcpy(&((*apeTag)->footer),&T,sizeof(T));
@@ -203,9 +243,14 @@ int ReadMP3APETag ( FILE *fp,  struct MP3GainTagInfo *info, struct APETagStruct 
 		if (isize >= remaining || vsize > MAX_FIELD_SIZE || isize + 1 + vsize > remaining) break;
 
         name = (char*)malloc(isize+1);
+        value = (char*)malloc(vsize+1);
+        if (name == NULL || value == NULL) {
+            free(name);
+            free(value);
+            break;
+        }
 		memcpy(name, p, isize);
 		name[isize] = 0;
-        value = (char*)malloc(vsize+1);
         memcpy(value, p+isize+1, vsize);
         value[vsize] = 0;
 
@@ -225,44 +270,37 @@ int ReadMP3APETag ( FILE *fp,  struct MP3GainTagInfo *info, struct APETagStruct 
                 info->haveAlbumPeak = !0;
                 info->albumPeak = atof(value);
             } else if (!_stricmp(name,"MP3GAIN_UNDO")) {
-				/* value should be something like "+003,+003,W" */
-                info->haveUndo = !0;
-                vp = value;
-				memcpy(tmpString,vp,4);
-				tmpString[4] = '\0';
-                info->undoLeft = atoi(tmpString);
-                vp = vp + 5; /* skip the comma, too */
-				memcpy(tmpString,vp,4);
-				tmpString[4] = '\0';
-                info->undoRight = atoi(tmpString);
-                vp = vp + 5; /* skip the comma, too */
-                if ((*vp == 'w')||(*vp == 'W')) {
-                    info->undoWrap = !0;
-                } else {
-                    info->undoWrap = 0;
+				/* value should be something like "+003,+003,W". Parsed by field, not at fixed offsets: a
+				   shorter value (written by another tool, or damaged) was read past its end, and the
+				   garbage became an undo value that UndoGain then applied to the audio. */
+                char *endp;
+                long left = strtol(value, &endp, 10);
+                if (endp != value && *endp == ',') {
+                    char *rightStart = endp + 1;
+                    long right = strtol(rightStart, &endp, 10);
+                    if (endp != rightStart && left >= -255 && left <= 255 && right >= -255 && right <= 255) {
+                        info->haveUndo = !0;
+                        info->undoLeft = (int)left;
+                        info->undoRight = (int)right;
+                        info->undoWrap = (*endp == ',' && (endp[1] == 'w' || endp[1] == 'W')) ? !0 : 0;
+                    }
                 }
             } else if (!_stricmp(name,"MP3GAIN_MINMAX")) {
-				/* value should be something like "001,153" */
-                info->haveMinMaxGain = !0;
-                vp = value;
-				memcpy(tmpString,vp,3);
-				tmpString[3] = '\0';
-                info->minGain = atoi(tmpString);
-                vp = vp + 4; /* skip the comma, too */
-				memcpy(tmpString,vp,3);
-				tmpString[3] = '\0';
-                info->maxGain = atoi(tmpString);
+				/* value should be something like "001,153" (parsed by field, see MP3GAIN_UNDO) */
+                int mn, mx;
+                if (ParseMinMax(value, &mn, &mx)) {
+                    info->haveMinMaxGain = !0;
+                    info->minGain = (unsigned char)mn;
+                    info->maxGain = (unsigned char)mx;
+                }
             } else if (!_stricmp(name,"MP3GAIN_ALBUM_MINMAX")) {
-				/* value should be something like "001,153" */
-                info->haveAlbumMinMaxGain = !0;
-                vp = value;
-				memcpy(tmpString,vp,3);
-				tmpString[3] = '\0';
-                info->albumMinGain = atoi(tmpString);
-                vp = vp + 4; /* skip the comma, too */
-				memcpy(tmpString,vp,3);
-				tmpString[3] = '\0';
-                info->albumMaxGain = atoi(tmpString);
+				/* value should be something like "001,153" (parsed by field, see MP3GAIN_UNDO) */
+                int mn, mx;
+                if (ParseMinMax(value, &mn, &mx)) {
+                    info->haveAlbumMinMaxGain = !0;
+                    info->albumMinGain = (unsigned char)mn;
+                    info->albumMaxGain = (unsigned char)mx;
+                }
             } else {
                 memcpy((*apeTag)->otherFields + (*apeTag)->otherFieldsSize, p - 8, 8 + isize + 1 + vsize);
                 (*apeTag)->otherFieldsSize += 8 + isize + 1 + vsize;
@@ -286,12 +324,16 @@ int ReadMP3APETag ( FILE *fp,  struct MP3GainTagInfo *info, struct APETagStruct 
 	(*apeTag)->originalTagSize = TagLen;
 
     if ( Read_LE_Uint32 (T.Flags) & (1<<31) ) {  // Tag contains header
-        *tag_offset -= sizeof (T);
-
-		fseek (fp, *tag_offset, SEEK_SET);
-		fread (&((*apeTag)->header),1,sizeof(T),fp);
-		(*apeTag)->haveHeader = !0;
-		(*apeTag)->originalTagSize += sizeof(T);
+		/* Only if it is really there: trusting the flag on a damaged tag moved the tag's start 32 bytes
+		   into the audio, which a later rewrite then truncated */
+		if (*tag_offset >= (long)sizeof(T) &&
+			fseek (fp, *tag_offset - sizeof(T), SEEK_SET) == 0 &&
+			fread (&((*apeTag)->header),1,sizeof(T),fp) == sizeof(T) &&
+			memcmp((*apeTag)->header.ID, "APETAGEX", sizeof(T.ID)) == 0) {
+			*tag_offset -= sizeof (T);
+			(*apeTag)->haveHeader = !0;
+			(*apeTag)->originalTagSize += sizeof(T);
+		}
 	}
 
     if (otherFieldsCount != origTagCount) {

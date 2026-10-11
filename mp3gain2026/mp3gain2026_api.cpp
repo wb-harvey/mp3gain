@@ -44,6 +44,8 @@ int changeGainAndTag(char *filename, int leftgainchange, int rightgainchange,
                      struct MP3GainTagInfo *tag, struct FileTagsStruct *fileTag);
 
 extern int QuietMode;
+extern int wrapGain;
+extern int UsingTemp;
 extern short int saveTime;
 extern int mp3gain_lastFileOk;
 }
@@ -55,7 +57,7 @@ static char g_lastError[2048] = {0};
 static MP3G_ProgressCallback g_progressCb = nullptr;
 static void* g_progressUserData = nullptr;
 
-#define MP3GAIN2026_VERSION "2026.1.0"
+#define MP3GAIN2026_VERSION "2026.2.1"
 #define DEFAULT_TARGET_DB 89.0
 
 /* ── Helpers ──────────────────────────────────────────────────── */
@@ -181,6 +183,8 @@ static void LegacyErrorOr(const char* fallback) {
 static void ResetLegacyState() {
     mp3gainerr = 0;
     blnCancel = 0;
+    wrapGain = 0;    /* switches a mp3gain_main call may have left set */
+    UsingTemp = 0;
     if (mp3gainerrstr != NULL) {
         free(mp3gainerrstr);
         mp3gainerrstr = NULL;
@@ -425,7 +429,11 @@ static int UndoGainU8(const char* filePath,
     } else {
         /* Apply the stored undo change through the tag update too, so the stored undo becomes 0:
            before, it stayed, and undoing twice reversed the change twice */
+        /* A change made with wrapping is undone with wrapping (as mp3gain /u does): undoing it with
+           clamping left the wrapped frames at the wrong level */
+        wrapGain = info.undoWrap ? 1 : 0;
         ret = ChangeGainWithTags(filePath, info.undoLeft, info.undoRight, preserveTimestamp, &info, &fileTags);
+        wrapGain = 0;
     }
     FreeFileTags(&fileTags);
 

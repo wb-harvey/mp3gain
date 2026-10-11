@@ -81,4 +81,22 @@ int u8_rename(const char* from, const char* to)
     return result;
 }
 
+int u8_replace(const char* from, const char* to)
+{
+    wchar_t* wfrom = u8_to_wide(from);
+    wchar_t* wto = u8_to_wide(to);
+    int result = -1;
+    if (wfrom != NULL && wto != NULL) {
+        if (MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            result = 0;
+        else
+            errno = EACCES;
+    } else {
+        errno = EINVAL;
+    }
+    free(wfrom);
+    free(wto);
+    return result;
+}
+
 #endif /* WIN32 */
