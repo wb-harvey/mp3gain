@@ -38,6 +38,14 @@ extern int apperrmsg;
 
 /* Forward declaration of the legacy changeGain function */
 int changeGain(char *filename, int leftgainchange, int rightgainchange);
+/* changeGain plus the matching tag update (undo, gains, peaks, min/max), as the mp3gain tool does it;
+   0 on success */
+int changeGainAndTag(char *filename, int leftgainchange, int rightgainchange,
+                     struct MP3GainTagInfo *tag, struct FileTagsStruct *fileTag);
+
+extern int QuietMode;
+extern short int saveTime;
+extern int mp3gain_lastFileOk;
 }
 
 /* ── Module State ─────────────────────────────────────────────── */
@@ -139,6 +147,57 @@ MP3G_API int MP3G_GetVersion(char* buffer, int bufLen) {
 extern "C" struct MP3GainTagInfo *globalTagInfoHack;
 extern "C" int __cdecl mp3gain_main(int argc, char **argv);
 
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, NULL, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring wide(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], n);
+    wide.resize(n - 1);
+    return wide;
+}
+
+/* The absolute form of a UTF-8 path, still UTF-8 */
+static bool FullPathU8(const char* utf8, std::string& full) {
+    std::wstring wide = Utf8ToWide(utf8);
+    if (wide.empty()) return false;
+    DWORD n = GetFullPathNameW(wide.c_str(), 0, NULL, NULL);
+    if (n == 0) return false;
+    std::wstring buf(n, L'\0');
+    DWORD m = GetFullPathNameW(wide.c_str(), n, &buf[0], NULL);
+    if (m == 0 || m >= n) return false;
+    buf.resize(m);
+    return ToUtf8(buf.c_str(), full);
+}
+
+/* Makes the legacy code's error text (or the fallback, if it gave none) the last error */
+static void LegacyErrorOr(const char* fallback) {
+    const char* msg = (mp3gainerrstr != NULL && mp3gainerrstr[0]) ? mp3gainerrstr : fallback;
+    while (*msg == '\n' || *msg == '\r' || *msg == ' ') msg++; /* legacy messages start with "\n" */
+    SetLastErrorMsg(msg);
+    size_t len = strlen(g_lastError);
+    while (len > 0 && (g_lastError[len - 1] == '\n' || g_lastError[len - 1] == '\r')) g_lastError[--len] = '\0';
+}
+
+static void ResetLegacyState() {
+    mp3gainerr = 0;
+    blnCancel = 0;
+    if (mp3gainerrstr != NULL) {
+        free(mp3gainerrstr);
+        mp3gainerrstr = NULL;
+    }
+}
+
+static void FreeFileTags(struct FileTagsStruct* fileTags) {
+    if (fileTags->apeTag) {
+        if (fileTags->apeTag->otherFields)
+            free(fileTags->apeTag->otherFields);
+        free(fileTags->apeTag);
+        fileTags->apeTag = NULL;
+    }
+    if (fileTags->lyrics3tag) { free(fileTags->lyrics3tag); fileTags->lyrics3tag = NULL; }
+    if (fileTags->id31tag) { free(fileTags->id31tag); fileTags->id31tag = NULL; }
+}
+
 static int AnalyzeFileU8(const char* filePath,
                          MP3G_AnalysisResult* result,
                          int ignoreTags,
@@ -159,10 +218,23 @@ static int AnalyzeFileU8(const char* filePath,
         mp3gainerrstr = NULL;
     }
 
-    const char* args[10];
+    /* The legacy parser takes any argument starting with '/' as a switch, file names included
+       ("/user/x.mp3" turned on undo mode): pass the full path, which never starts with '/' */
+    std::string fullPath;
+    if (!FullPathU8(filePath, fullPath)) {
+        LeaveCriticalSection(&g_cs);
+        SetLastErrorMsg("The file path is not valid");
+        return MP3G_ERR_INVALIDARG;
+    }
+
+    const char* args[12];
     int argc = 0;
     args[argc++] = "mp3gain2026_api";
     args[argc++] = "/q";
+    /* Analysis is read-only: read stored tag values, never write them (it used to add or rewrite the
+       APE tag of every file it looked at, changing its modified time). Callers write tags explicitly. */
+    args[argc++] = "/s";
+    args[argc++] = "n";
     if (ignoreTags) {
         args[argc++] = "/s";
         args[argc++] = "s";
@@ -171,34 +243,39 @@ static int AnalyzeFileU8(const char* filePath,
         args[argc++] = "/s";
         args[argc++] = "r";
     }
-    args[argc++] = filePath;
+    args[argc++] = fullPath.c_str();
 
     struct MP3GainTagInfo localTag;
     memset(&localTag, 0, sizeof(localTag));
     globalTagInfoHack = &localTag;
 
-    int ret = mp3gain_main(argc, (char**)args);
+    mp3gain_main(argc, (char**)args);
+    globalTagInfoHack = NULL; /* it pointed at this stack variable */
+
+    /* Not found, not an MP3, too short or too damaged to analyse: an error, not a zeroed "success"
+       that callers took as "no change needed" (or used to compute a gain change) */
+    if (!mp3gain_lastFileOk) {
+        int code = GetFileAttributesW(Utf8ToWide(fullPath).c_str()) == INVALID_FILE_ATTRIBUTES
+            ? MP3G_ERR_FILEOPEN : MP3G_ERR_NOTMP3;
+        LegacyErrorOr(code == MP3G_ERR_FILEOPEN
+            ? "The file could not be opened"
+            : "No MP3 audio could be analysed: the file is not an MP3, is too short, or is damaged");
+        LeaveCriticalSection(&g_cs);
+        return code;
+    }
 
     struct MP3GainTagInfo* tag = &localTag;
+    result->trackGain = tag->trackGain;
+    result->trackPeak = tag->trackPeak;
+    result->albumGain = tag->albumGain;
+    result->albumPeak = tag->albumPeak;
+    result->minGlobalGain = tag->minGain;
+    result->maxGlobalGain = tag->maxGain;
 
-    if (tag != NULL) {
-        result->trackGain = tag->trackGain;
-        result->trackPeak = tag->trackPeak;
-        result->albumGain = tag->albumGain;
-        result->albumPeak = tag->albumPeak;
-        result->minGlobalGain = tag->minGain;
-        result->maxGlobalGain = tag->maxGain;
-
-        /* Calculate max no-clip gain */
-        if (result->trackPeak > 0.0) {
-            double maxAmplitude = result->trackPeak;
-            double maxGainDb = 20.0 * log10(1.0 / maxAmplitude);
-            result->maxNoClipGain = (int)floor(maxGainDb * 4.0);
-        }
-    } else {
-        SetLastErrorMsg("Analysis failed to populate tag stats");
-        LeaveCriticalSection(&g_cs);
-        return MP3G_ERR_GENERIC;
+    /* Max gain change (in mp3gain's 1.505 dB steps) that doesn't clip: 4*log2(1/peak), as mp3gain
+       computes it. It used 20*log10(1/peak)*4, about 6 times too large, so it never protected. */
+    if (result->trackPeak > 0.0) {
+        result->maxNoClipGain = (int)floor(4.0 * log10(1.0 / result->trackPeak) / log10(2.0));
     }
 
     LeaveCriticalSection(&g_cs);
@@ -239,6 +316,43 @@ MP3G_API void MP3G_AlbumFinish(void) {
 
 /* ── Gain Modification ────────────────────────────────────────── */
 
+/* Reads the file's MP3Gain tag values (APE, else the ID3 copy). False when the file can't be opened. */
+static bool ReadLegacyTags(const char* filePath, struct MP3GainTagInfo* info, struct FileTagsStruct* fileTags) {
+    memset(info, 0, sizeof(*info));
+    memset(fileTags, 0, sizeof(*fileTags));
+    if (!ReadMP3GainAPETag((char*)filePath, info, fileTags))
+        return false;
+    if (!info->haveTrackGain)
+        ReadMP3GainID3Tag((char*)filePath, info);
+    return true;
+}
+
+/*
+ * Changes the gain of every frame by `left`/`right` steps and updates the tag to match, the way the
+ * mp3gain tool does it (changeGainAndTag): undo -= change, track/album gain -= change * 1.505 dB,
+ * peaks scaled, min/max gain shifted. Before, only the frames changed: the tag still described the old
+ * level, so the next analysis trusted it and the same change was applied again, and the undo
+ * information never recorded the change. Call with g_cs held.
+ */
+static int ChangeGainWithTags(const char* filePath, int left, int right, int preserveTimestamp,
+                              struct MP3GainTagInfo* info, struct FileTagsStruct* fileTags) {
+    QuietMode = 1;   /* no progress text on the host's stderr */
+    saveTime = 0;    /* the timestamp is kept here, around the whole change */
+    if (preserveTimestamp)
+        fileTime((char*)filePath, storeTime);
+
+    int result = changeGainAndTag((char*)filePath, left, right, info, fileTags);
+
+    if (preserveTimestamp)
+        fileTime((char*)filePath, setStoredTime);
+
+    if (result != 0 || mp3gainerr != 0) {
+        LegacyErrorOr("The gain change could not be written");
+        return MP3G_ERR_FILEWRITE;
+    }
+    return MP3G_OK;
+}
+
 static int ApplyGainU8(const char* filePath,
                        int gainChange,
                        int preserveTimestamp) {
@@ -248,36 +362,19 @@ static int ApplyGainU8(const char* filePath,
 
     ClearLastError();
     EnterCriticalSection(&g_cs);
+    ResetLegacyState();
 
-    /* Reset legacy state */
-    mp3gainerr = 0;
-    blnCancel = 0;
-    if (mp3gainerrstr != NULL) {
-        free(mp3gainerrstr);
-        mp3gainerrstr = NULL;
+    struct MP3GainTagInfo info;
+    struct FileTagsStruct fileTags;
+    int ret;
+    if (!ReadLegacyTags(filePath, &info, &fileTags)) {
+        /* Nothing changed: without the tag the change couldn't be recorded for undo */
+        LegacyErrorOr("The file could not be opened");
+        ret = MP3G_ERR_FILEOPEN;
+    } else {
+        ret = ChangeGainWithTags(filePath, gainChange, gainChange, preserveTimestamp, &info, &fileTags);
     }
-
-    /* Store file time if preserving */
-    if (preserveTimestamp) {
-        fileTime((char*)filePath, storeTime);
-    }
-
-    /* Apply gain change */
-    changeGain((char*)filePath, gainChange, gainChange);
-
-    /* Restore file time if preserving */
-    if (preserveTimestamp) {
-        fileTime((char*)filePath, setStoredTime);
-    }
-
-    int ret = MP3G_OK;
-    if (mp3gainerr != 0) {
-        if (mp3gainerrstr)
-            SetLastErrorMsg(mp3gainerrstr);
-        else
-            SetLastErrorMsg("Unknown error during gain application");
-        ret = MP3G_ERR_GENERIC;
-    }
+    FreeFileTags(&fileTags);
 
     LeaveCriticalSection(&g_cs);
     return ret;
@@ -289,21 +386,19 @@ static int ApplyTrackGainU8(const char* filePath,
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath) return MP3G_ERR_INVALIDARG;
 
-    /* First analyze the file to get current gain */
+    /* First analyze the file to get current gain (an analysis failure is now reported, not a zero gain) */
     MP3G_AnalysisResult analysis;
     int ret = AnalyzeFileU8(filePath, &analysis, 0, 0);
     if (ret != MP3G_OK) return ret;
 
-    /* Calculate required change in quarter-dB steps (mp3gain's unit) */
+    /* The change in mp3gain's steps of 5*log10(2) = 1.505 dB, rounded half away from zero as mp3gain does */
     double gainDiff = targetDb - DEFAULT_TARGET_DB + analysis.trackGain;
-    int gainChange = (int)round(gainDiff / 1.5); /* Each mp3gain step is ~1.5 dB */
+    int gainChange = (int)round(gainDiff / (5.0 * log10(2.0)));
 
     if (gainChange == 0) return MP3G_OK;
 
     return ApplyGainU8(filePath, gainChange, preserveTimestamp);
 }
-
-static int ReadTagsU8(const char* filePath, MP3G_TagInfo* tagInfo);
 
 static int UndoGainU8(const char* filePath,
                       int preserveTimestamp) {
@@ -311,45 +406,26 @@ static int UndoGainU8(const char* filePath,
     if (!filePath) return MP3G_ERR_INVALIDARG;
 
     ClearLastError();
-
-    /* Read existing tags to find undo info */
-    MP3G_TagInfo tagInfo;
-    int ret = ReadTagsU8(filePath, &tagInfo);
-    if (ret != MP3G_OK) return ret;
-
-    if (!tagInfo.haveUndo) {
-        SetLastErrorMsg("No undo information available in file tags");
-        return MP3G_ERR_GENERIC;
-    }
-
-    /* Apply the inverse gain */
     EnterCriticalSection(&g_cs);
+    ResetLegacyState();
 
-    mp3gainerr = 0;
-    blnCancel = 0;
-    if (mp3gainerrstr != NULL) {
-        free(mp3gainerrstr);
-        mp3gainerrstr = NULL;
-    }
-
-    if (preserveTimestamp) {
-        fileTime((char*)filePath, storeTime);
-    }
-
-    changeGain((char*)filePath, tagInfo.undoLeft, tagInfo.undoRight);
-
-    if (preserveTimestamp) {
-        fileTime((char*)filePath, setStoredTime);
-    }
-
-    ret = MP3G_OK;
-    if (mp3gainerr != 0) {
-        if (mp3gainerrstr)
-            SetLastErrorMsg(mp3gainerrstr);
-        else
-            SetLastErrorMsg("Unknown error during undo");
+    struct MP3GainTagInfo info;
+    struct FileTagsStruct fileTags;
+    int ret;
+    if (!ReadLegacyTags(filePath, &info, &fileTags)) {
+        LegacyErrorOr("The file could not be opened");
+        ret = MP3G_ERR_FILEOPEN;
+    } else if (!info.haveUndo) {
+        SetLastErrorMsg("No undo information available in file tags");
         ret = MP3G_ERR_GENERIC;
+    } else if (info.undoLeft == 0 && info.undoRight == 0) {
+        ret = MP3G_OK; /* already at its original level */
+    } else {
+        /* Apply the stored undo change through the tag update too, so the stored undo becomes 0:
+           before, it stayed, and undoing twice reversed the change twice */
+        ret = ChangeGainWithTags(filePath, info.undoLeft, info.undoRight, preserveTimestamp, &info, &fileTags);
     }
+    FreeFileTags(&fileTags);
 
     LeaveCriticalSection(&g_cs);
     return ret;
@@ -364,19 +440,18 @@ static int ReadTagsU8(const char* filePath,
 
     ClearLastError();
     EnterCriticalSection(&g_cs);
+    ResetLegacyState();
 
     memset(tagInfo, 0, sizeof(MP3G_TagInfo));
 
     struct MP3GainTagInfo legacyInfo;
-    memset(&legacyInfo, 0, sizeof(legacyInfo));
     struct FileTagsStruct fileTags;
-    memset(&fileTags, 0, sizeof(fileTags));
-
-    int ret = ReadMP3GainAPETag((char*)filePath, &legacyInfo, &fileTags);
-
-    /* Also try ID3 if APE didn't have info */
-    if (!legacyInfo.haveTrackGain) {
-        ReadMP3GainID3Tag((char*)filePath, &legacyInfo);
+    if (!ReadLegacyTags(filePath, &legacyInfo, &fileTags)) {
+        /* Was reported as success with no tags, which callers took as "no undo information" */
+        FreeFileTags(&fileTags);
+        LegacyErrorOr("The file could not be opened");
+        LeaveCriticalSection(&g_cs);
+        return MP3G_ERR_FILEOPEN;
     }
 
     /* Copy to output struct */
@@ -395,15 +470,7 @@ static int ReadTagsU8(const char* filePath,
     tagInfo->minGain       = legacyInfo.minGain;
     tagInfo->maxGain       = legacyInfo.maxGain;
 
-    /* Free tag memory */
-    if (fileTags.apeTag) {
-        if (fileTags.apeTag->otherFields)
-            free(fileTags.apeTag->otherFields);
-        free(fileTags.apeTag);
-    }
-    if (fileTags.lyrics3tag) free(fileTags.lyrics3tag);
-    if (fileTags.id31tag) free(fileTags.id31tag);
-
+    FreeFileTags(&fileTags);
     LeaveCriticalSection(&g_cs);
     return MP3G_OK;
 }
@@ -420,14 +487,21 @@ static int WriteTagsU8(const char* filePath,
 
     ClearLastError();
     EnterCriticalSection(&g_cs);
+    ResetLegacyState();
 
     struct MP3GainTagInfo legacyInfo;
     memset(&legacyInfo, 0, sizeof(legacyInfo));
     struct FileTagsStruct fileTags;
     memset(&fileTags, 0, sizeof(fileTags));
 
-    /* Read existing tags first */
-    ReadMP3GainAPETag((char*)filePath, &legacyInfo, &fileTags);
+    /* Read existing tags first: they give the tag's position. Writing after a failed read used a zero
+       offset, which would put the tag over the start of the file. */
+    if (!ReadMP3GainAPETag((char*)filePath, &legacyInfo, &fileTags)) {
+        FreeFileTags(&fileTags);
+        LegacyErrorOr("The file could not be opened");
+        LeaveCriticalSection(&g_cs);
+        return MP3G_ERR_FILEOPEN;
+    }
 
     /* Update with new analysis results */
     legacyInfo.haveTrackGain = 1;
@@ -458,17 +532,10 @@ static int WriteTagsU8(const char* filePath,
         legacyInfo.undoRight = 0;
     }
 
-
     int ret = WriteMP3GainAPETag((char*)filePath, &legacyInfo, &fileTags, preserveTimestamp);
-
-    /* Free tag memory */
-    if (fileTags.apeTag) {
-        if (fileTags.apeTag->otherFields)
-            free(fileTags.apeTag->otherFields);
-        free(fileTags.apeTag);
-    }
-    if (fileTags.lyrics3tag) free(fileTags.lyrics3tag);
-    if (fileTags.id31tag) free(fileTags.id31tag);
+    FreeFileTags(&fileTags);
+    if (ret == 0)
+        LegacyErrorOr("The tag could not be written");
 
     LeaveCriticalSection(&g_cs);
     return (ret == 0) ? MP3G_ERR_FILEWRITE : MP3G_OK;
@@ -481,11 +548,15 @@ static int RemoveTagsU8(const char* filePath,
 
     ClearLastError();
     EnterCriticalSection(&g_cs);
+    ResetLegacyState();
 
-    RemoveMP3GainAPETag((char*)filePath, preserveTimestamp);
+    /* Its result used to be ignored: a failure was reported as success */
+    int ret = RemoveMP3GainAPETag((char*)filePath, preserveTimestamp) ? MP3G_OK : MP3G_ERR_FILEWRITE;
+    if (ret != MP3G_OK)
+        LegacyErrorOr("The tag could not be removed");
 
     LeaveCriticalSection(&g_cs);
-    return MP3G_OK;
+    return ret;
 }
 
 /* ── Path exports: ANSI (existing callers) and UTF-16 (...W) ──── */

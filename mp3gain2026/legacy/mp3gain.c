@@ -149,6 +149,14 @@ int deleteTag = 0;
 int forceRecalculateTag = 0;
 int checkTagOnly = 0;
 static int useId3 = 0;
+/* "/s n": read stored tags but never write them, so analysis leaves the file untouched (the DLL's
+   analysis is read-only; the caller writes tags explicitly) */
+int noTagWrite = 0;
+/* Set by mp3gain_main: the last file was found and analysed (or its tag gave a track gain). The DLL
+   API reports failure when this is 0 instead of returning a zeroed result as success. */
+int mp3gain_lastFileOk = 0;
+/* A write to the file being modified failed (flushWriteBuff); changeGain reports it */
+static int writeFailed = 0;
 
 int gSuccess;
 
@@ -187,8 +195,11 @@ static
 void flushWriteBuff() {
 	unsigned long i;
 	for (i = 0; i < writebuffercnt; i++) {
-		fseek(inf,writebuffer[i].fileposition,SEEK_SET);
-		fwrite(writebuffer[i].val,1,2,inf);
+		/* A failed seek or write (disk error, network share dropped) leaves some frames changed and
+		   others not: remember it so changeGain reports the failure */
+		if (fseek(inf,writebuffer[i].fileposition,SEEK_SET) != 0 ||
+			fwrite(writebuffer[i].val,1,2,inf) != 2)
+			writeFailed = 1;
 	}
 	writebuffercnt = 0;
 };
@@ -537,6 +548,9 @@ void fileTime(char *filename, timeAction action)
 #endif
 
     if (action == storeTime) {
+		/* Forget the previous file's times: if reading this file's fails, setStoredTime must do
+		   nothing rather than stamp another file's times onto it */
+		timeSaved = 0;
 #ifdef WIN32
 		/* filename is UTF-8 (see utf8_io.h): open it through the wide API */
 		wchar_t* wname = u8_to_wide(filename);
@@ -563,10 +577,12 @@ void fileTime(char *filename, timeAction action)
         if (timeSaved) {
 #ifdef WIN32
 			wchar_t* wname = u8_to_wide(filename);
+			/* Setting the times needs attribute access only; sharing lets it work while another
+			   program (a player, the indexer) has the file open, where exclusive GENERIC_WRITE failed */
 			outfh = wname == NULL ? INVALID_HANDLE_VALUE :
 					CreateFileW(wname,
-						GENERIC_WRITE,
-						0,
+						FILE_WRITE_ATTRIBUTES,
+						FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 						NULL,
 						OPEN_EXISTING,
 						FILE_ATTRIBUTE_NORMAL,
@@ -718,6 +734,7 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
   frame = 0;
   BadLayer = 0;
   LayerSet = Reckless;
+  writeFailed = 0;
 
   NowWriting = !0;
 
@@ -985,9 +1002,10 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
 		else {
 			passError(MP3GAIN_CANCELLED,3,"Cancelled processing.\n", filename, " is probably corrupted now.");
 		}
-		if (saveTime) 
-		  fileTime(filename, setStoredTime);		
-		return;
+		if (saveTime)
+		  fileTime(filename, setStoredTime);
+		NowWriting = 0;
+		return M3G_ERR_CANT_MODIFY_FILE; /* was "return;": an undefined value the caller took as success */
 	}
 #endif
 
@@ -1082,10 +1100,16 @@ int changeGain(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchang
 	}
 	else {
 		flushWriteBuff();
-		fclose(inf);
+		if (fclose(inf) != 0) writeFailed = 1;
 		inf = NULL;
-		if (saveTime) 
-		  fileTime(filename, setStoredTime);		
+		if (saveTime)
+		  fileTime(filename, setStoredTime);
+		if (writeFailed) {
+			NowWriting = 0;
+			passError(MP3GAIN_UNSPECIFED_ERROR, 3, "\nWriting to ", filename,
+				" failed part way; its volume may be only partly changed\n");
+			return M3G_ERR_CANT_MODIFY_FILE;
+		}
 	}
   }
 
@@ -1118,31 +1142,36 @@ void WriteAacGainTags (AACGainHandle aacH, struct MP3GainTagInfo *info) {
 
 
 static
-void WriteMP3GainTag(char *filename AACGAIN_ARG(AACGainHandle aacH), struct MP3GainTagInfo *info, struct FileTagsStruct *fileTags, int saveTimeStamp)
+int WriteMP3GainTag(char *filename AACGAIN_ARG(AACGainHandle aacH), struct MP3GainTagInfo *info, struct FileTagsStruct *fileTags, int saveTimeStamp)
 {
 #ifdef AACGAIN
 	if (aacH) {
 		WriteAacGainTags(aacH, info);
+		return 1;
 	} else
 #endif
 	if (useId3) {
 		/* Write ID3 tag; remove stale APE tag if it exists. */
 		if (WriteMP3GainID3Tag(filename, info, saveTimeStamp) >= 0)
-			RemoveMP3GainAPETag(filename, saveTimeStamp);
+			return RemoveMP3GainAPETag(filename, saveTimeStamp);
+		return 0;
 	} else {
 		/* Write APE tag */
-		WriteMP3GainAPETag(filename, info, fileTags, saveTimeStamp);
+		return WriteMP3GainAPETag(filename, info, fileTags, saveTimeStamp);
 	}
 }
 
 
-void changeGainAndTag(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchange, int rightgainchange, struct MP3GainTagInfo *tag, struct FileTagsStruct *fileTag) {
+/* Returns 0 on success, else changeGain's error code or M3G_ERR_CANT_MODIFY_FILE when the audio was
+   changed but the tag (and so the undo information) could not be written */
+int changeGainAndTag(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftgainchange, int rightgainchange, struct MP3GainTagInfo *tag, struct FileTagsStruct *fileTag) {
 	double dblGainChange;
 	int curMin;
 	int curMax;
+	int result = 0;
 
 	if (leftgainchange != 0 || rightgainchange != 0) {
-		if (!changeGain(filename AACGAIN_ARG(aacH), leftgainchange, rightgainchange)) {
+		if ((result = changeGain(filename AACGAIN_ARG(aacH), leftgainchange, rightgainchange)) == 0) {
 			if (!tag->haveUndo) {
 				tag->undoLeft = 0;
 				tag->undoRight = 0;
@@ -1205,10 +1234,12 @@ void changeGainAndTag(char *filename AACGAIN_ARG(AACGainHandle aacH), int leftga
 					}
 				}
 			} // if (leftgainchange == rightgainchange ...
-			WriteMP3GainTag(filename AACGAIN_ARG(aacH), tag, fileTag, saveTime);
+			if (!WriteMP3GainTag(filename AACGAIN_ARG(aacH), tag, fileTag, saveTime))
+				result = M3G_ERR_CANT_MODIFY_FILE;
 		} // if (!changeGain(filename ...
 	}// if (leftgainchange !=0 ...
 
+	return result;
 }
 
 static 
@@ -1300,8 +1331,10 @@ int errUsage(char *progname) {
 #endif
 	fprintf(stderr,"Usage: %s [options] <infile> [<infile 2> ...]\n",progname);
 	fprintf(stderr,"  --use %c? or %ch for a full list of options\n",SWITCH_CHAR,SWITCH_CHAR);
+    #ifndef asWIN32DLL /* in the DLL these are the host process's streams */
     fclose(stdout);
     fclose(stderr);
+#endif
 	return 1;
 }
 
@@ -1367,8 +1400,10 @@ int fullUsage(char *progname) {
 #endif
 		fprintf(stderr,"If you specify %cr and %ca, only the second one will work\n",SWITCH_CHAR,SWITCH_CHAR);
 		fprintf(stderr,"If you do not specify %cc, the program will stop and ask before\n     applying gain change to a file that might clip\n",SWITCH_CHAR);
+        #ifndef asWIN32DLL /* in the DLL these are the host process's streams */
         fclose(stdout);
         fclose(stderr);
+#endif
 		return 0;
 }
 
@@ -1478,6 +1513,26 @@ int mp3gain_main(int argc, char **argv) {
 #endif
 
     gSuccess = 1;
+
+	/* The command-line switches set these globals and nothing reset them: in the DLL, where this
+	   runs once per call, one call's /s s, /s r, /u, /t... stayed on for every later call */
+	QuietMode = 0;
+	UsingTemp = 0;
+	NowWriting = 0;
+	whichChannel = 0;
+	BadLayer = 0;
+	LayerSet = 0;
+	Reckless = 0;
+	wrapGain = 0;
+	undoChanges = 0;
+	skipTag = 0;
+	deleteTag = 0;
+	forceRecalculateTag = 0;
+	checkTagOnly = 0;
+	useId3 = 0;
+	noTagWrite = 0;
+	writebuffercnt = 0;
+	mp3gain_lastFileOk = 0;
 
     if (argc < 2) {
 		errUsage(argv[0]);
@@ -1671,6 +1726,10 @@ int mp3gain_main(int argc, char **argv) {
                         case 'R':
                             forceRecalculateTag = !0;
                             break;
+                        case 'n':
+                        case 'N':
+                            noTagWrite = !0;
+                            break;
 						case 'i':
 						case 'I':
 							useId3 = 1;
@@ -1698,8 +1757,10 @@ int mp3gain_main(int argc, char **argv) {
 				case 'v':
 				case 'V':
 					showVersion(argv[0]);
+                    #ifndef asWIN32DLL /* in the DLL these are the host process's streams */
                     fclose(stdout);
                     fclose(stderr);
+#endif
 					return 0;
 					
 				case 'w':
@@ -2283,10 +2344,16 @@ int mp3gain_main(int argc, char **argv) {
 #ifndef __GNUC__
 										}
 										__except(1) {
-											fprintf(stderr,"Error analyzing %s. This mp3 has some very corrupt data.\n",curfilename);
-											fclose(stdout);
-											fclose(stderr);
-											return 1;
+											/* Was: close stdout/stderr (the whole host process's, with the shared CRT)
+											   and return, leaking the tag buffers and the decoder and leaving this
+											   file open. Report it, release them, and fail the call. */
+											passError(MP3GAIN_UNSPECIFED_ERROR, 3, "Error analyzing ", curfilename,
+												": this mp3 has some very corrupt data.\n");
+											ExitMP3(&mp);
+											if (inf) { fclose(inf); inf = NULL; }
+											fileok[mainloop] = 0;
+											gSuccess = 0;
+											goto mainCleanup;
 										}
 #endif
 #endif
@@ -2608,7 +2675,8 @@ int mp3gain_main(int argc, char **argv) {
         (!directSingleChannelGain)&&
         (!deleteTag)&&
         (!skipTag)&&
-        (!checkTagOnly)) { 
+        (!noTagWrite)&&
+        (!checkTagOnly)) {
 		/* if we made changes, we already updated the tags */
 		for (mainloop = fileStart; mainloop < argc; mainloop++) {
 			if (fileok[mainloop]) {
@@ -2622,6 +2690,10 @@ int mp3gain_main(int argc, char **argv) {
 	if (globalTagInfoHack != NULL && argc > 0) {
 		*globalTagInfoHack = tagInfo[argc - 1];
 	}
+	/* Found, with valid frames, and a track gain from the analysis or its tag ("Not enough samples"
+	   and unreadable or non-MP3 files leave one of these unset) */
+	mp3gain_lastFileOk = argc > fileStart && fileok[argc - 1] && tagInfo[argc - 1].haveTrackGain;
+mainCleanup:
     free(tagInfo);
 	/* now stored in tagInfo--- free(maxsample); */
 	free(fileok);

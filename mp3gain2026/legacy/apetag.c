@@ -452,17 +452,16 @@ int WriteMP3GainAPETag (char *filename, struct MP3GainTagInfo *info, struct File
 
 	newTagLength += mp3gainTagLength;
 
-	newFieldData = (char *)malloc(newTagLength - (sizeof(newFooter) + sizeof(newHeader)));
+	newFieldData = (char *)malloc(newTagLength - (sizeof(newFooter) + sizeof(newHeader)) + 1);
+	if (newFieldData == NULL) {
+		passError(MP3GAIN_UNSPECIFED_ERROR, 3, "\nOut of memory writing the tag of ", filename, "\n");
+		return 0;
+	}
 	mp3gainTagData = newFieldData;
 
 	if (fileTags->apeTag) {
-		/* Check if the new tag will be shorter than the old tag */
-		if (fileTags->apeTag->originalTagSize > newTagLength) {
-			/* we'll need to truncate the file */
-            if (!truncate_file(filename, fileTags->tagOffset)) {
-                return 0;
-            }
-		}
+		/* A new tag shorter than the old one is trimmed after it is written (below): truncating first
+		   would lose the ID3v1/Lyrics3 tags, held only in memory, if the write then failed */
 		memcpy(&newFooter,&(fileTags->apeTag->footer),sizeof(newFooter));
 		Write_LE_Uint32(newFooter.Length, newTagLength - sizeof(newHeader));
 		Write_LE_Uint32(newFooter.TagCount, newTagCount);
@@ -612,27 +611,50 @@ int WriteMP3GainAPETag (char *filename, struct MP3GainTagInfo *info, struct File
 	if (outputFile == NULL) {
 		  passError( MP3GAIN_UNSPECIFED_ERROR, 3,
 			  "\nCan't open ", filename, " for modifying\n");
+		free(newFieldData);
 		return 0;
 	}
-	fseek(outputFile,fileTags->tagOffset,SEEK_SET);
-	if (newTagCount > 0) { /* write APE tag */
-		fwrite(&newHeader,1,sizeof(newHeader),outputFile);
-		fwrite(newFieldData, 1, newTagLength - (sizeof(newFooter) + sizeof(newHeader)), outputFile);
-		fwrite(&newFooter,1,sizeof(newFooter),outputFile);
-	}
-	if (fileTags->lyrics3TagSize > 0) {
-		fwrite(fileTags->lyrics3tag, 1, fileTags->lyrics3TagSize, outputFile);
-	}
-    else if (fileTags->id31tag) { //by definition, Lyrics3 tag includes id3 tag,
-		fwrite(fileTags->id31tag, 1, 128, outputFile); //so only write id3 tag alone if
-    }                                                  //no Lyrics3 tag
+	{
+		/* Every write is checked: a short write (disk full, network share dropped) leaves a damaged
+		   tag, and the caller must hear about it instead of getting success */
+		int writeOk = fseek(outputFile,fileTags->tagOffset,SEEK_SET) == 0;
+		unsigned long fieldBytes = newTagLength - (sizeof(newFooter) + sizeof(newHeader));
+		long newEnd = fileTags->tagOffset;
+		if (writeOk && newTagCount > 0) { /* write APE tag */
+			writeOk = fwrite(&newHeader,1,sizeof(newHeader),outputFile) == sizeof(newHeader) &&
+					  fwrite(newFieldData, 1, fieldBytes, outputFile) == fieldBytes &&
+					  fwrite(&newFooter,1,sizeof(newFooter),outputFile) == sizeof(newFooter);
+			newEnd += (long)newTagLength;
+		}
+		if (writeOk && fileTags->lyrics3TagSize > 0) {
+			writeOk = fwrite(fileTags->lyrics3tag, 1, fileTags->lyrics3TagSize, outputFile) == (size_t)fileTags->lyrics3TagSize;
+			newEnd += fileTags->lyrics3TagSize;
+		}
+		else if (writeOk && fileTags->id31tag) { //by definition, Lyrics3 tag includes id3 tag,
+			writeOk = fwrite(fileTags->id31tag, 1, 128, outputFile) == 128; //so only write id3 tag alone if
+			newEnd += 128;                                                  //no Lyrics3 tag
+		}
 
-	fclose(outputFile);
-	
+		if (fclose(outputFile) != 0) writeOk = 0;
+		free(newFieldData);
+
+		if (!writeOk) {
+			passError(MP3GAIN_UNSPECIFED_ERROR, 3, "\nWriting the tag of ", filename, " failed; the file's tags may be damaged\n");
+			return 0;
+		}
+
+		/* The new tag was shorter than the old one: drop what is left of the old tag after it */
+		if (fileTags->apeTag && fileTags->apeTag->originalTagSize > newTagLength) {
+			if (!truncate_file(filename, newEnd)) {
+				passError(MP3GAIN_UNSPECIFED_ERROR, 3, "\nTrimming the old tag of ", filename, " failed\n");
+				return 0;
+			}
+		}
+	}
+
 	if (saveTimeStamp)
 		fileTime(filename,setStoredTime);
 
-	free(newFieldData);
     return 1;
 };
 
@@ -659,8 +681,10 @@ int RemoveMP3GainAPETag (char *filename, int saveTimeStamp) {
     fileTags.lyrics3tag = NULL;
     fileTags.lyrics3TagSize = 0;
 
-	ReadMP3GainAPETag(filename, &info, &fileTags);
-
+	if (!ReadMP3GainAPETag(filename, &info, &fileTags)) {
+		passError(MP3GAIN_UNSPECIFED_ERROR, 3, "\nCan't open ", filename, " to read its tags\n");
+		return 0;
+	}
 
 	/* if any MP3Gain tags exist, then we're going to change the tag */
 	if (info.haveAlbumGain || info.haveAlbumPeak || info.haveTrackGain || info.haveTrackPeak || info.haveMinMaxGain || info.haveAlbumMinMaxGain || info.haveUndo)
@@ -674,8 +698,19 @@ int RemoveMP3GainAPETag (char *filename, int saveTimeStamp) {
 	info.haveAlbumMinMaxGain = 0;
 	info.haveUndo = 0;
 
-	if (info.dirty)
-		WriteMP3GainAPETag(filename, &info, &fileTags, saveTimeStamp);
+	{
+		int ok = 1;
+		if (info.dirty)
+			ok = WriteMP3GainAPETag(filename, &info, &fileTags, saveTimeStamp);
 
-    return 1;
+		/* ReadMP3GainAPETag allocated these */
+		if (fileTags.apeTag) {
+			if (fileTags.apeTag->otherFields) free(fileTags.apeTag->otherFields);
+			free(fileTags.apeTag);
+		}
+		if (fileTags.lyrics3tag) free(fileTags.lyrics3tag);
+		if (fileTags.id31tag) free(fileTags.id31tag);
+
+		return ok;
+	}
 };
