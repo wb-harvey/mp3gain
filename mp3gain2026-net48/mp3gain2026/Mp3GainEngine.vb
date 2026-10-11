@@ -61,8 +61,13 @@ Public NotInheritable Class Mp3GainEngine
                         Throw New Mp3GainException(ret, err)
                     End If
 
+                    ' The undo information comes from here; a failed read used to look like "no undo", and the
+                    ' next change then overwrote the file's real undo value
                     Dim tags As New NativeMethods.MP3G_TagInfo()
-                    NativeMethods.MP3G_ReadTags(filePath, tags)
+                    ret = NativeMethods.MP3G_ReadTags(filePath, tags)
+                    If ret <> NativeMethods.MP3G_OK Then
+                        Throw New Mp3GainException(ret, GetLastErrorMessage())
+                    End If
 
                     Dim ar As New AnalysisResult()
                     ar.TrackGain = native.TrackGain

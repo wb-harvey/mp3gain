@@ -121,7 +121,8 @@ internal sealed class NativeEngineInstance : IDisposable
     /// </summary>
     /// <param name="sourceDllPath">Path to the original mp3gain2026.dll</param>
     /// <param name="instanceId">Unique integer identifier for this instance</param>
-    public NativeEngineInstance(string sourceDllPath, int instanceId)
+    /// <param name="copiesDir">Writable folder for the DLL copies of instances after the first</param>
+    public NativeEngineInstance(string sourceDllPath, int instanceId, string? copiesDir)
     {
         InstanceId = instanceId;
 
@@ -133,19 +134,9 @@ internal sealed class NativeEngineInstance : IDisposable
         }
         else
         {
-            string dir = Path.GetDirectoryName(sourceDllPath)!;
-
-            // Optional: Background cleanup of orphaned temp DLLs from previous crashes
-            if (instanceId == 1) 
-            {
-                Task.Run(() => {
-                    try {
-                        foreach (var f in Directory.GetFiles(dir, "mp3gain2026_temp_*.dll")) {
-                            try { File.Delete(f); } catch { /* locked or no access */ }
-                        }
-                    } catch { } // ignore directory access errors
-                });
-            }
+            // The pool's per-process folder (it cleans up after crashed runs before any copy is made; the
+            // background cleanup that ran here could delete a sibling copy before it was loaded)
+            string dir = copiesDir ?? throw new InvalidOperationException("No folder for the engine's DLL copies");
 
             // Create a unique copy of the DLL so Windows gives us independent globals
             string uniqueId = Guid.NewGuid().ToString("N").Substring(0, 8);

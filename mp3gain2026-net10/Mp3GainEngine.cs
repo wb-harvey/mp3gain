@@ -38,12 +38,12 @@ public sealed class Mp3GainEngine : IDisposable
         return await Task.Run(async () =>
         {
             var inst = await _pool.RentAsync(ct);
+            NativeMethods.MP3G_ProgressCallback? progressDelegate = null;
             try
             {
                 ct.ThrowIfCancellationRequested();
 
                 // Set up per-instance progress callback
-                NativeMethods.MP3G_ProgressCallback? progressDelegate = null;
                 if (progress != null)
                 {
                     progressDelegate = (percent, _) => progress.Report(percent);
@@ -59,12 +59,12 @@ public sealed class Mp3GainEngine : IDisposable
                     throw new Mp3GainException(ret, error);
                 }
 
+                // The undo information comes from here; a failed read used to look like "no undo", and the
+                // next change then overwrote the file's real undo value
                 var tags = new NativeMethods.MP3G_TagInfo();
-                inst.ReadTags(filePath, ref tags);
-
-                // Clear the progress callback
-                if (progressDelegate != null)
-                    inst.SetProgressCallback(null!, IntPtr.Zero);
+                ret = inst.ReadTags(filePath, ref tags);
+                if (ret != NativeMethods.MP3G_OK)
+                    throw new Mp3GainException(ret, inst.GetLastErrorMessage());
 
                 return new AnalysisResult
                 {
@@ -82,6 +82,13 @@ public sealed class Mp3GainEngine : IDisposable
             }
             finally
             {
+                // Clear the callback on every path: it was cleared only on success, so after a failed
+                // analysis the pooled DLL copy kept a pointer to a delegate the GC could collect
+                if (progressDelegate != null)
+                {
+                    try { inst.SetProgressCallback(null!, IntPtr.Zero); } catch { /* best effort */ }
+                    GC.KeepAlive(progressDelegate);
+                }
                 _pool.Return(inst);
             }
         }, ct);

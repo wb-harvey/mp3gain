@@ -14,12 +14,12 @@ namespace Mp3Gain2026;
 internal sealed class NativeEnginePool : IDisposable
 {
     private readonly ConcurrentBag<NativeEngineInstance> _available = new();
-    private readonly SemaphoreSlim _semaphore;
-    private readonly NativeEngineInstance[] _allInstances;
+    private SemaphoreSlim _semaphore;
+    private NativeEngineInstance[] _allInstances;
     private bool _disposed;
 
     /// <summary>Number of parallel engine instances in this pool.</summary>
-    public int PoolSize { get; }
+    public int PoolSize { get; private set; }
 
     /// <summary>
     /// Creates a pool of engine instances.
@@ -43,13 +43,89 @@ internal sealed class NativeEnginePool : IDisposable
                 "mp3gain2026.dll not found. Searched base directory and runtimes/ subdirectories.",
                 Path.Combine(baseDir, "mp3gain2026.dll"));
 
-        // Create all instances
-        for (int i = 0; i < poolSize; i++)
+        // Instances after the first load a renamed copy of the DLL (Windows gives each its own globals).
+        // The copies used to go next to the DLL, which fails without admin rights under Program Files and
+        // took the whole engine down; they now go in a per-process folder under %LOCALAPPDATA%.
+        if (poolSize > 1)
         {
-            var instance = new NativeEngineInstance(dllPath, i);
-            _allInstances[i] = instance;
-            _available.Add(instance);
+            _copiesDir = PrepareCopiesDirectory();
+            if (_copiesDir == null)
+            {
+                // No writable folder for copies: one engine, loaded directly, still works
+                poolSize = 1;
+                PoolSize = 1;
+                _semaphore.Dispose();
+                _semaphore = new SemaphoreSlim(1, 1);
+                _allInstances = new NativeEngineInstance[1];
+            }
         }
+
+        // Create all instances; if one fails, free the ones already loaded before giving up
+        try
+        {
+            for (int i = 0; i < poolSize; i++)
+            {
+                var instance = new NativeEngineInstance(dllPath, i, _copiesDir);
+                _allInstances[i] = instance;
+                _available.Add(instance);
+            }
+        }
+        catch
+        {
+            foreach (var instance in _allInstances)
+                instance?.Dispose();
+            DeleteCopiesDirectory();
+            throw;
+        }
+    }
+
+    private readonly string? _copiesDir;
+
+    /// <summary>
+    /// Creates %LOCALAPPDATA%\Mp3Gain2026\engines\&lt;process id&gt; and removes the folders of processes that are
+    /// no longer running (left by a crash). Done before any copy is made, so the cleanup can't delete a
+    /// copy that is about to be loaded. Null when no folder can be created.
+    /// </summary>
+    private static string? PrepareCopiesDirectory()
+    {
+        try
+        {
+            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Mp3Gain2026", "engines");
+            Directory.CreateDirectory(root);
+            foreach (string dir in Directory.GetDirectories(root))
+            {
+                if (int.TryParse(Path.GetFileName(dir), out int pid) && pid != Environment.ProcessId && !IsRunning(pid))
+                {
+                    try { Directory.Delete(dir, recursive: true); } catch { /* still locked */ }
+                }
+            }
+            string mine = Path.Combine(root, Environment.ProcessId.ToString());
+            Directory.CreateDirectory(mine);
+            return mine;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void DeleteCopiesDirectory()
+    {
+        if (_copiesDir == null) return;
+        try { Directory.Delete(_copiesDir, recursive: true); } catch { /* removed at the next start */ }
     }
 
     /// <summary>
@@ -103,6 +179,7 @@ internal sealed class NativeEnginePool : IDisposable
         }
 
         _semaphore.Dispose();
+        DeleteCopiesDirectory();
     }
 
     private string? ResolveDllPath(string baseDir)

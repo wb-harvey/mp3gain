@@ -836,7 +836,7 @@ Public Class frmMain
 
                                                               ' Calculate exact steps needed
                                                               Dim gainDiff As Double = targetDb - 89.0 + file.TrackGain.Value
-                                                              Dim gainChange As Integer = CInt(Math.Round(gainDiff / 1.50514997831991)) ' MP3Gain step
+                                                              Dim gainChange As Integer = LimitForClipping(file, CInt(Math.Round(gainDiff / StepDb, MidpointRounding.AwayFromZero)))
 
                                                               ' Skip files that need no change
                                                               If gainChange = 0 Then
@@ -847,23 +847,8 @@ Public Class frmMain
                                                               file.Status = FileStatus.Applying
                                                               RefreshGrid()
 
-                                                              If gainChange <> 0 Then
-                                                                  Await _engine.ApplyGainAsync(file.FilePath, gainChange, _settings.PreserveTimestamp, ct)
-
-                                                                  file.UndoLeft -= gainChange
-                                                                  file.UndoRight -= gainChange
-                                                                  file.HasUndo = True
-
-                                                                  file.TrackGain -= gainChange * 1.50514997831991
-                                                                  file.TrackPeak *= Math.Pow(10.0, (gainChange * 1.50514997831991) / 20.0)
-                                                                  If file.AlbumGain.HasValue Then file.AlbumGain -= gainChange * 1.50514997831991
-                                                                  If file.AlbumPeak.HasValue Then file.AlbumPeak *= Math.Pow(10.0, (gainChange * 1.50514997831991) / 20.0)
-                                                              End If
-
-                                                              ' Write modified tags to preserve Undo state
-                                                              If Not _settings.IgnoreTags Then
-                                                                  Await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct)
-                                                              End If
+                                                              Await _engine.ApplyGainAsync(file.FilePath, gainChange, _settings.PreserveTimestamp, ct)
+                                                              Await RecordGainChangeAsync(file, gainChange, targetDb)
 
                                                               file.Status = FileStatus.Applied
                                                           End Function)
@@ -888,28 +873,24 @@ Public Class frmMain
 
         Dim targetDb As Double = CDbl(_targetDbSpinner.Value)
 
+        ' With "Don't clip", the album moves together: no file is raised more than the file with the least
+        ' headroom allows (limiting each file separately would change the levels within the album)
+        Dim albumNoClip As Integer? = Nothing
+        If _settings.DontClip AndAlso targets.All(Function(f) f.MaxNoClipGain.HasValue) Then
+            albumNoClip = targets.Min(Function(f) f.MaxNoClipGain.Value)
+        End If
+
         Await ProcessFilesAsync("Applying Album Gain", targets, Async Function(file, ct)
                                                                     file.Status = FileStatus.Applying
                                                                     RefreshGrid()
 
                                                                     Dim albumDbChange As Double = targetDb - 89.0 + file.AlbumGain.Value
-                                                                    Dim gainChange As Integer = CInt(Math.Round(albumDbChange / 1.50514997831991))
+                                                                    Dim gainChange As Integer = CInt(Math.Round(albumDbChange / StepDb, MidpointRounding.AwayFromZero))
+                                                                    If albumNoClip.HasValue AndAlso gainChange > albumNoClip.Value Then gainChange = Math.Max(0, albumNoClip.Value)
 
                                                                     If gainChange <> 0 Then
                                                                         Await _engine.ApplyGainAsync(file.FilePath, gainChange, _settings.PreserveTimestamp, ct)
-
-                                                                        file.UndoLeft -= gainChange
-                                                                        file.UndoRight -= gainChange
-                                                                        file.HasUndo = True
-
-                                                                        file.TrackGain -= gainChange * 1.50514997831991
-                                                                        file.TrackPeak *= Math.Pow(10.0, (gainChange * 1.50514997831991) / 20.0)
-                                                                        file.AlbumGain -= gainChange * 1.50514997831991
-                                                                        file.AlbumPeak *= Math.Pow(10.0, (gainChange * 1.50514997831991) / 20.0)
-                                                                    End If
-
-                                                                    If Not _settings.IgnoreTags Then
-                                                                        Await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct)
+                                                                        Await RecordGainChangeAsync(file, gainChange, targetDb)
                                                                     End If
 
                                                                     file.Status = FileStatus.Applied
@@ -943,20 +924,7 @@ Public Class frmMain
 
                                                                           If steps <> 0 Then
                                                                               Await _engine.ApplyGainAsync(file.FilePath, steps, _settings.PreserveTimestamp, ct)
-
-                                                                              file.UndoLeft -= steps
-                                                                              file.UndoRight -= steps
-                                                                              file.HasUndo = True
-
-                                                                              If file.TrackGain.HasValue Then file.TrackGain -= steps * 1.50514997831991
-                                                                              If file.TrackPeak.HasValue Then file.TrackPeak *= Math.Pow(10.0, (steps * 1.50514997831991) / 20.0)
-                                                                              If file.AlbumGain.HasValue Then file.AlbumGain -= steps * 1.50514997831991
-                                                                              If file.AlbumPeak.HasValue Then file.AlbumPeak *= Math.Pow(10.0, (steps * 1.50514997831991) / 20.0)
-
-                                                                              Dim targetDb As Double = CDbl(_targetDbSpinner.Value)
-                                                                              If Not _settings.IgnoreTags Then
-                                                                                  Await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct)
-                                                                              End If
+                                                                              Await RecordGainChangeAsync(file, steps, CDbl(_targetDbSpinner.Value))
                                                                           End If
 
                                                                           file.Status = FileStatus.Applied
@@ -982,22 +950,27 @@ Public Class frmMain
         If result <> DialogResult.Yes Then Return
 
         Await ProcessFilesAsync("Undoing Gain", targets, Async Function(file, ct)
+                                                             Dim previousStatus = file.Status
                                                              file.Status = FileStatus.Applying
                                                              RefreshGrid()
 
                                                              Try
-                                                                 Await _engine.UndoGainAsync(file.FilePath, True, ct)
+                                                                 Await _engine.UndoGainAsync(file.FilePath, _settings.PreserveTimestamp, ct)
                                                              Catch ex As Mp3GainException When ex.Message.Contains("No undo information available")
-                                                                 MessageBox.Show($"UNDO data not found for {file.FileName}. Skip?", "MP3Gain 2026", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                                                                 ' Shown in the list instead of a message box per file; the status goes back to what it was,
+                                                                 ' not left at "Applying" (which Apply took as analyzed)
+                                                                 file.Status = If(previousStatus = FileStatus.Applying, FileStatus.Pending, previousStatus)
+                                                                 file.StatusMessage = "No undo information in this file"
                                                                  Return
                                                              End Try
 
-                                                             ' Crucial: remove old Undo tags BEFORE re-analyzing
+                                                             ' The level is restored: from here on, finish even if Cancel is pressed, so the tags match it.
+                                                             ' The DLL already reset the stored undo; removing the tags clears the rest of the old values.
                                                              If Not _settings.IgnoreTags Then
-                                                                 Await _engine.RemoveTagsAsync(file.FilePath, _settings.PreserveTimestamp, ct)
+                                                                 Await _engine.RemoveTagsAsync(file.FilePath, _settings.PreserveTimestamp, CancellationToken.None)
                                                              End If
 
-                                                             Dim analysisResult = Await _engine.AnalyzeFileAsync(file.FilePath, _settings.IgnoreTags, _settings.RecalcTags, ct)
+                                                             Dim analysisResult = Await _engine.AnalyzeFileAsync(file.FilePath, _settings.IgnoreTags, _settings.RecalcTags, CancellationToken.None)
                                                              file.TrackGain = analysisResult.TrackGain
                                                              file.TrackPeak = analysisResult.TrackPeak
                                                              file.AlbumGain = analysisResult.AlbumGain
@@ -1015,7 +988,7 @@ Public Class frmMain
 
                                                              Dim targetDb As Double = CDbl(_targetDbSpinner.Value)
                                                              If Not _settings.IgnoreTags Then
-                                                                 Await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct)
+                                                                 Await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, CancellationToken.None)
                                                              End If
                                                          End Function)
     End Sub
@@ -1157,6 +1130,7 @@ Public Class frmMain
         }
             If dlg.ShowDialog(Me) <> DialogResult.OK Then Return
 
+            Try
             Using writer As New StreamWriter(dlg.FileName)
                 Dim isLegacy As Boolean = dlg.FileName.EndsWith(".m3g", StringComparison.OrdinalIgnoreCase)
 
@@ -1175,6 +1149,12 @@ Public Class frmMain
                     Next
                 End If
             End Using
+            Catch ex As Exception
+                ' A read-only folder or a file open elsewhere used to end in the unhandled-exception dialog
+                MessageBox.Show(Me, $"The analysis could not be saved:{vbCrLf}{ex.Message}", "MP3Gain 2026",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error)
+                Return
+            End Try
 
             _statusLabel.Text = $"Analysis saved to {IO.Path.GetFileName(dlg.FileName)}"
             _statusLabel.ForeColor = TextSecondary
@@ -1182,6 +1162,8 @@ Public Class frmMain
     End Sub
 
     Private Sub OnLoadAnalysis(sender As Object, e As EventArgs)
+        If _isProcessing Then Return ' it replaces the list the running job is working through
+
         Using dlg As New OpenFileDialog() With {
             .Title = "Load Analysis",
             .Filter = "MP3Gain Analysis (*.m3g)|*.m3g|Tab-Separated Values (*.tsv)|*.tsv|All Files (*.*)|*.*",
@@ -1222,7 +1204,10 @@ Public Class frmMain
                         Dim ag As Double
                         If fields(6) <> "?" AndAlso Double.TryParse(fields(6), ag) Then f.AlbumGain = ag
 
-                        f.Status = If(f.TrackGain.HasValue, FileStatus.Analyzed, FileStatus.Pending)
+                        ' Shown for reference, but analyzed again before any change: the file may have changed
+                        ' since it was saved, and the saved list has no undo information (applying from it
+                        ' overwrote the file's real undo value)
+                        f.Status = FileStatus.Pending
                         _files.Add(f)
                     Next
                 Else
@@ -1235,8 +1220,7 @@ Public Class frmMain
                         Dim tp As Double : If parts.Length > 2 AndAlso Double.TryParse(parts(2), tp) Then f.TrackPeak = tp
                         Dim ag As Double : If parts.Length > 3 AndAlso Double.TryParse(parts(3), ag) Then f.AlbumGain = ag
                         Dim ap As Double : If parts.Length > 4 AndAlso Double.TryParse(parts(4), ap) Then f.AlbumPeak = ap
-                        Dim st As FileStatus
-                        If parts.Length > 7 AndAlso [Enum].TryParse(parts(7), st) Then f.Status = st
+                        f.Status = FileStatus.Pending ' analyzed again before any change (see above)
                         _files.Add(f)
                     Next
                 End If
@@ -1292,6 +1276,41 @@ Public Class frmMain
     '  PROCESSING INFRASTRUCTURE
     ' ══════════════════════════════════════════════════════════════
 
+    Private Const StepDb As Double = 1.50514997831991 ' one mp3gain step: 5*log10(2) dB
+
+    ''' <summary>
+    ''' Records a gain change of <paramref name="steps"/> that has been applied to the file. The DLL wrote the
+    ''' change into the file's tag itself (undo included), so the undo is read back from the file rather than
+    ''' computed from this list's values, which may be stale (loaded analysis, file never analyzed). Runs
+    ''' without the cancel token: the audio has already changed, and a Cancel must not leave the tags behind.
+    ''' </summary>
+    Private Async Function RecordGainChangeAsync(file As Mp3FileInfo, steps As Integer, targetDb As Double) As Task
+        Dim tags = Await _engine.ReadTagsAsync(file.FilePath, CancellationToken.None)
+        file.HasUndo = tags.HasUndo
+        file.UndoLeft = tags.UndoLeft
+        file.UndoRight = tags.UndoRight
+
+        Dim factor As Double = Math.Pow(10.0, steps * StepDb / 20.0)
+        If file.TrackGain.HasValue Then file.TrackGain -= steps * StepDb
+        If file.TrackPeak.HasValue Then file.TrackPeak *= factor
+        If file.AlbumGain.HasValue Then file.AlbumGain -= steps * StepDb
+        If file.AlbumPeak.HasValue Then file.AlbumPeak *= factor
+
+        ' Store the levels for later runs, but only real ones: a file that was never analyzed has none, and
+        ' writing zeros would make the next analysis trust a 0 dB gain
+        If Not _settings.IgnoreTags AndAlso file.TrackGain.HasValue AndAlso file.TrackPeak.HasValue Then
+            Await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, CancellationToken.None)
+        End If
+    End Function
+
+    ''' <summary>The gain change in steps, lowered so it doesn't clip when "Don't clip" is on.</summary>
+    Private Function LimitForClipping(file As Mp3FileInfo, steps As Integer) As Integer
+        If _settings.DontClip AndAlso file.MaxNoClipGain.HasValue AndAlso steps > file.MaxNoClipGain.Value Then
+            Return Math.Max(0, file.MaxNoClipGain.Value)
+        End If
+        Return steps
+    End Function
+
     Private Function GetSelectedOrAllFiles() As List(Of Mp3FileInfo)
         If _grid.SelectedRows.Count > 0 AndAlso _grid.SelectedRows.Count < _files.Count Then
             Return _grid.SelectedRows.Cast(Of DataGridViewRow)() _
@@ -1305,6 +1324,7 @@ Public Class frmMain
     Private Async Function ProcessFilesAsync(operationName As String, targets As List(Of Mp3FileInfo),
         processFunc As Func(Of Mp3FileInfo, CancellationToken, Task)) As Task
 
+        SyncOptionsFromMenu()
         _isProcessing = True
         _cts = New CancellationTokenSource()
         _fileProgressLabel.Visible = False
@@ -1375,6 +1395,7 @@ Public Class frmMain
             End If
 
             _isProcessing = False
+            If _closeWhenIdle Then BeginInvoke(New Action(AddressOf Close)) ' the close put off until this job stopped
             _totalProgressLabel.Visible = False
             _totalProgressBar.Visible = False
             SetToolbarEnabled(True)
@@ -1416,10 +1437,31 @@ Public Class frmMain
     '  CLEANUP
     ' ══════════════════════════════════════════════════════════════
 
+    Private _closeWhenIdle As Boolean ' the window was closed during a job: close when it stops
+
     Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
-        If _cts IsNot Nothing Then _cts.Cancel()
+        If _isProcessing Then
+            ' Shutting the DLL down now ran under a call still writing on a worker thread (a file left half
+            ' changed, then the process exit killed the write): stop after the current file, then close
+            e.Cancel = True
+            _closeWhenIdle = True
+            If _cts IsNot Nothing Then _cts.Cancel()
+            _statusLabel.Text = "Stopping after the current file, then closing..."
+            Return
+        End If
         If _engine IsNot Nothing Then _engine.Dispose()
 
+        SyncOptionsFromMenu()
+        _settings.Save()
+
+        MyBase.OnFormClosing(e)
+    End Sub
+
+    ''' <summary>
+    ''' Copies the menu's options into the settings. Done at the start of every job: they used to be copied
+    ''' only on close, so ticking an option did nothing until the next start.
+    ''' </summary>
+    Private Sub SyncOptionsFromMenu()
         _settings.AlwaysOnTop = _alwaysOnTopItem.Checked
         _settings.AddSubfolders = _addSubfoldersItem.Checked
         _settings.PreserveTimestamp = _preserveTimestampItem.Checked
@@ -1438,10 +1480,6 @@ Public Class frmMain
         End If
 
         _settings.TargetVolume = _targetDbSpinner.Value
-
-        _settings.Save()
-
-        MyBase.OnFormClosing(e)
     End Sub
 
 End Class

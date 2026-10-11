@@ -1023,7 +1023,7 @@ public partial class MainForm : Form
 				file.UndoRight = preAnalysis.UndoRight;
 			}
 			double gainDiff = targetDb - 89.0 + file.TrackGain.Value;
-			int gainChange = (int)Math.Round(gainDiff / 1.50514997831991);
+			int gainChange = LimitForClipping(file, (int)Math.Round(gainDiff / StepDb, MidpointRounding.AwayFromZero));
 			if (gainChange == 0)
 			{
 				file.Status = FileStatus.Applied;
@@ -1035,27 +1035,8 @@ public partial class MainForm : Form
 				{
 					RefreshGrid();
 				});
-				if (gainChange != 0)
-				{
-					await _engine.ApplyGainAsync(file.FilePath, gainChange, _settings.PreserveTimestamp, ct);
-					file.UndoLeft -= gainChange;
-					file.UndoRight -= gainChange;
-					file.HasUndo = true;
-					file.TrackGain -= (double)gainChange * 1.50514997831991;
-					file.TrackPeak *= Math.Pow(10.0, (double)gainChange * 1.50514997831991 / 20.0);
-					if (file.AlbumGain.HasValue)
-					{
-						file.AlbumGain -= (double)gainChange * 1.50514997831991;
-					}
-					if (file.AlbumPeak.HasValue)
-					{
-						file.AlbumPeak *= Math.Pow(10.0, (double)gainChange * 1.50514997831991 / 20.0);
-					}
-				}
-				if (!_settings.IgnoreTags)
-				{
-					await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct);
-				}
+				await _engine.ApplyGainAsync(file.FilePath, gainChange, _settings.PreserveTimestamp, ct);
+				await RecordGainChangeAsync(file, gainChange, targetDb);
 				file.Status = FileStatus.Applied;
 			}
 		}, forceSequential: true);
@@ -1086,6 +1067,10 @@ public partial class MainForm : Form
 			return;
 		}
 		double targetDb = (double)_targetDbSpinner.Value;
+		// With "Don't clip", the album moves together: no file is raised more than the quietest-headroom
+		// file allows (limiting each file separately would change the levels within the album)
+		int? albumNoClip = _settings.DontClip && targets.All(f => f.MaxNoClipGain.HasValue)
+			? targets.Min(f => f.MaxNoClipGain!.Value) : null;
 		await ProcessFilesAsync("Applying Album Gain", targets, async delegate(Mp3FileInfo file, CancellationToken ct)
 		{
 			file.Status = FileStatus.Applying;
@@ -1093,22 +1078,16 @@ public partial class MainForm : Form
 			{
 				RefreshGrid();
 			});
-			double albumDbChange = targetDb - 89.0 + file.AlbumGain.Value;
-			int gainChange = (int)Math.Round(albumDbChange / 1.50514997831991);
+			double albumDbChange = targetDb - 89.0 + file.AlbumGain!.Value;
+			int gainChange = (int)Math.Round(albumDbChange / StepDb, MidpointRounding.AwayFromZero);
+			if (albumNoClip.HasValue && gainChange > albumNoClip.Value)
+			{
+				gainChange = Math.Max(0, albumNoClip.Value);
+			}
 			if (gainChange != 0)
 			{
 				await _engine.ApplyGainAsync(file.FilePath, gainChange, _settings.PreserveTimestamp, ct);
-				file.UndoLeft -= gainChange;
-				file.UndoRight -= gainChange;
-				file.HasUndo = true;
-				file.TrackGain -= (double)gainChange * 1.50514997831991;
-				file.TrackPeak *= Math.Pow(10.0, (double)gainChange * 1.50514997831991 / 20.0);
-				file.AlbumGain -= (double)gainChange * 1.50514997831991;
-				file.AlbumPeak *= Math.Pow(10.0, (double)gainChange * 1.50514997831991 / 20.0);
-			}
-			if (!_settings.IgnoreTags)
-			{
-				await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct);
+				await RecordGainChangeAsync(file, gainChange, targetDb);
 			}
 			file.Status = FileStatus.Applied;
 		}, forceSequential: true);
@@ -1144,6 +1123,7 @@ public partial class MainForm : Form
 		{
 			MessageBox.Show("Channel-specific gain modification is not yet supported by the modern MP3Gain 2026 engine.\n\nThe gain will be applied equally to both channels.", "Feature Unsupported", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
 		}
+		double targetDb = (double)_targetDbSpinner.Value; // read here: the work runs on another thread
 		await ProcessFilesAsync("Applying Constant Gain", targets, async delegate(Mp3FileInfo file, CancellationToken ct)
 		{
 			file.Status = FileStatus.Applying;
@@ -1154,30 +1134,7 @@ public partial class MainForm : Form
 			if (steps != 0)
 			{
 				await _engine.ApplyGainAsync(file.FilePath, steps, _settings.PreserveTimestamp, ct);
-				file.UndoLeft -= steps;
-				file.UndoRight -= steps;
-				file.HasUndo = true;
-				if (file.TrackGain.HasValue)
-				{
-					file.TrackGain -= (double)steps * 1.50514997831991;
-				}
-				if (file.TrackPeak.HasValue)
-				{
-					file.TrackPeak *= Math.Pow(10.0, (double)steps * 1.50514997831991 / 20.0);
-				}
-				if (file.AlbumGain.HasValue)
-				{
-					file.AlbumGain -= (double)steps * 1.50514997831991;
-				}
-				if (file.AlbumPeak.HasValue)
-				{
-					file.AlbumPeak *= Math.Pow(10.0, (double)steps * 1.50514997831991 / 20.0);
-				}
-				double targetDb = (double)_targetDbSpinner.Value;
-				if (!_settings.IgnoreTags)
-				{
-					await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct);
-				}
+				await RecordGainChangeAsync(file, steps, targetDb);
 			}
 			file.Status = FileStatus.Applied;
 		}, forceSequential: true);
@@ -1204,8 +1161,10 @@ public partial class MainForm : Form
 		{
 			return;
 		}
+		double targetDb = (double)_targetDbSpinner.Value; // read here: the work runs on another thread
 		await ProcessFilesAsync("Undoing Gain", targets, async delegate(Mp3FileInfo file, CancellationToken ct)
 		{
+			FileStatus previousStatus = file.Status;
 			file.Status = FileStatus.Applying;
 			BeginInvoke(delegate
 			{
@@ -1213,23 +1172,28 @@ public partial class MainForm : Form
 			});
 			try
 			{
-				await _engine.UndoGainAsync(file.FilePath, preserveTimestamp: true, ct);
+				await _engine.UndoGainAsync(file.FilePath, _settings.PreserveTimestamp, ct);
 			}
 			catch (Mp3GainException ex) when (ex.Message.Contains("No undo information available"))
 			{
-				MessageBox.Show("UNDO data not found for " + file.FileName + ". Skip?", "MP3Gain 2026", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+				// Shown in the list (a message box per file, from a worker thread, could hide behind the window);
+				// the status goes back to what it was, not left at "Applying" (which Apply took as analyzed)
+				file.Status = previousStatus == FileStatus.Applying ? FileStatus.Pending : previousStatus;
+				file.StatusMessage = "No undo information in this file";
 				return;
 			}
+			// The level is restored: from here on, finish even if Cancel is pressed, so the tags match it.
+			// The DLL already reset the stored undo; removing the tags clears the rest of the old values.
 			if (!_settings.IgnoreTags)
 			{
-				await _engine.RemoveTagsAsync(file.FilePath, _settings.PreserveTimestamp, ct);
+				await _engine.RemoveTagsAsync(file.FilePath, _settings.PreserveTimestamp, CancellationToken.None);
 			}
 			Progress<int> progress = new Progress<int>(delegate(int pct)
 			{
 				file.Progress = pct;
 				RefreshGrid();
 			});
-			AnalysisResult analysisResult = await _engine.AnalyzeFileAsync(file.FilePath, _settings.IgnoreTags, _settings.RecalcTags, progress, ct);
+			AnalysisResult analysisResult = await _engine.AnalyzeFileAsync(file.FilePath, _settings.IgnoreTags, _settings.RecalcTags, progress, CancellationToken.None);
 			file.TrackGain = analysisResult.TrackGain;
 			file.TrackPeak = analysisResult.TrackPeak;
 			file.AlbumGain = analysisResult.AlbumGain;
@@ -1241,10 +1205,9 @@ public partial class MainForm : Form
 			file.UndoLeft = 0;
 			file.UndoRight = 0;
 			file.Status = FileStatus.Analyzed;
-			double targetDb = (double)_targetDbSpinner.Value;
 			if (!_settings.IgnoreTags)
 			{
-				await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, ct);
+				await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, CancellationToken.None);
 			}
 		}, forceSequential: true);
 	}
@@ -1434,6 +1397,8 @@ public partial class MainForm : Form
 		{
 			return;
 		}
+		try
+		{
 		using StreamWriter streamWriter = new StreamWriter(saveFileDialog.FileName);
 		if (saveFileDialog.FileName.EndsWith(".m3g", StringComparison.OrdinalIgnoreCase))
 		{
@@ -1454,12 +1419,23 @@ public partial class MainForm : Form
 				streamWriter.WriteLine($"{file2.FilePath}\t{file2.TrackGain}\t{file2.TrackPeak}\t{file2.AlbumGain}\t{file2.AlbumPeak}\t{file2.Volume}\t{file2.Clipping}\t{file2.Status}");
 			}
 		}
+		}
+		catch (Exception ex)
+		{
+			// A read-only folder or a file open elsewhere used to end in the unhandled-exception dialog
+			MessageBox.Show(this, "The analysis could not be saved:\n" + ex.Message, "MP3Gain 2026", MessageBoxButtons.OK, MessageBoxIcon.Hand);
+			return;
+		}
 		_statusLabel.Text = "Analysis saved to " + Path.GetFileName(saveFileDialog.FileName);
 		_statusLabel.ForeColor = TextSecondary;
 	}
 
 	private void OnLoadAnalysis(object? sender, EventArgs e)
 	{
+		if (_isProcessing)
+		{
+			return; // it replaces the list the running job is working through
+		}
 		using OpenFileDialog openFileDialog = new OpenFileDialog
 		{
 			Title = "Load Analysis",
@@ -1511,7 +1487,10 @@ public partial class MainForm : Form
 						{
 							mp3FileInfo.AlbumGain = result4;
 						}
-						mp3FileInfo.Status = (mp3FileInfo.TrackGain.HasValue ? FileStatus.Analyzed : FileStatus.Pending);
+						// Shown for reference, but analyzed again before any change: the file may have changed since
+						// it was saved, and the saved list has no undo information (applying from it overwrote the
+						// file's real undo value)
+						mp3FileInfo.Status = FileStatus.Pending;
 						_files.Add(mp3FileInfo);
 					}
 				}
@@ -1540,10 +1519,7 @@ public partial class MainForm : Form
 						{
 							mp3FileInfo2.AlbumPeak = result8;
 						}
-						if (array3.Length > 7 && Enum.TryParse<FileStatus>(array3[7], out var result9))
-						{
-							mp3FileInfo2.Status = result9;
-						}
+						mp3FileInfo2.Status = FileStatus.Pending; // analyzed again before any change (see above)
 						_files.Add(mp3FileInfo2);
 					}
 				}
@@ -1616,6 +1592,47 @@ public partial class MainForm : Form
 		return list;
 	}
 
+	private const double StepDb = 1.50514997831991; // one mp3gain step: 5*log10(2) dB
+
+	/// <summary>
+	/// Records a gain change of <paramref name="steps"/> that has been applied to the file. The DLL wrote the
+	/// change into the file's tag itself (undo included), so the undo is read back from the file rather than
+	/// computed from this list's values, which may be stale (loaded analysis, file never analyzed). Runs
+	/// without the cancel token: the audio has already changed, and a Cancel must not leave the tags behind.
+	/// </summary>
+	private async Task RecordGainChangeAsync(Mp3FileInfo file, int steps, double targetDb)
+	{
+		TagInfo tags = await _engine!.ReadTagsAsync(file.FilePath, CancellationToken.None);
+		file.HasUndo = tags.HasUndo;
+		file.UndoLeft = tags.UndoLeft;
+		file.UndoRight = tags.UndoRight;
+
+		double factor = Math.Pow(10.0, steps * StepDb / 20.0);
+		if (file.TrackGain.HasValue) file.TrackGain -= steps * StepDb;
+		if (file.TrackPeak.HasValue) file.TrackPeak *= factor;
+		if (file.AlbumGain.HasValue) file.AlbumGain -= steps * StepDb;
+		if (file.AlbumPeak.HasValue) file.AlbumPeak *= factor;
+
+		// Store the levels for later runs, but only real ones: a file that was never analyzed has none, and
+		// writing zeros would make the next analysis trust a 0 dB gain
+		if (!_settings.IgnoreTags && file.TrackGain.HasValue && file.TrackPeak.HasValue)
+		{
+			await _engine.WriteTagsAsync(file.FilePath, file, targetDb, _settings.PreserveTimestamp, CancellationToken.None);
+		}
+	}
+
+	/// <summary>The gain change in steps, lowered so it doesn't clip when "Don't clip" is on.</summary>
+	private int LimitForClipping(Mp3FileInfo file, int steps)
+	{
+		if (_settings.DontClip && file.MaxNoClipGain.HasValue && steps > file.MaxNoClipGain.Value)
+		{
+			return Math.Max(0, file.MaxNoClipGain.Value);
+		}
+		return steps;
+	}
+
+	private bool _closeWhenIdle; // the window was closed during a job: close when it stops
+
 	private List<Mp3FileInfo> GetSelectedOrAllFiles()
 	{
 		if (_grid.SelectedRows.Count > 0 && _grid.SelectedRows.Count < _files.Count)
@@ -1630,6 +1647,7 @@ public partial class MainForm : Form
 
 	private async Task ProcessFilesAsync(string operationName, List<Mp3FileInfo> targets, Func<Mp3FileInfo, CancellationToken, Task> processFunc, bool forceSequential = false)
 	{
+		SyncOptionsFromMenu();
 		_isProcessing = true;
 		_cts = new CancellationTokenSource();
 		_fileProgressLabel.Visible = false;
@@ -1702,6 +1720,10 @@ public partial class MainForm : Form
 		finally
 		{
 			_isProcessing = false;
+			if (_closeWhenIdle)
+			{
+				BeginInvoke(Close); // the close that was put off until this job stopped
+			}
 			_totalProgressLabel.Visible = false;
 			_totalProgressBar.Visible = false;
 			SetToolbarEnabled(enabled: true);
@@ -1752,8 +1774,29 @@ public partial class MainForm : Form
 
 	protected override void OnFormClosing(FormClosingEventArgs e)
 	{
-		_cts?.Cancel();
+		if (_isProcessing)
+		{
+			// Disposing the engine now freed the native DLL under a call still running on a worker thread
+			// (a crash, or a file left half rewritten): stop after the current file, then close
+			e.Cancel = true;
+			_closeWhenIdle = true;
+			_cts?.Cancel();
+			_statusLabel.Text = "Stopping after the current file, then closing...";
+			return;
+		}
 		_engine?.Dispose();
+		SyncOptionsFromMenu();
+		_settings.Save();
+		base.OnFormClosing(e);
+	}
+
+	/// <summary>
+	/// Copies the menu's options into the settings. Done at the start of every job: they used to be copied
+	/// only on close, so ticking an option (Re-calculate, Don't clip, Preserve timestamp...) did nothing
+	/// until the next start.
+	/// </summary>
+	private void SyncOptionsFromMenu()
+	{
 		_settings.AlwaysOnTop = _alwaysOnTopItem.Checked;
 		_settings.AddSubfolders = _addSubfoldersItem.Checked;
 		_settings.PreserveTimestamp = _preserveTimestampItem.Checked;
@@ -1776,8 +1819,6 @@ public partial class MainForm : Form
 		}
 		_settings.TargetVolume = _targetDbSpinner.Value;
 		_settings.LimitToSingleThread = _limitToSingleThreadItem.Checked;
-		_settings.Save();
-		base.OnFormClosing(e);
 	}
 
 }
