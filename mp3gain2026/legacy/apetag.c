@@ -11,6 +11,7 @@
 #else
 #include <unistd.h>
 #endif
+#include "utf8_io.h"  /* Unicode file names (after the system headers) */
 
 #ifndef WIN32
 #define _stricmp strcasecmp

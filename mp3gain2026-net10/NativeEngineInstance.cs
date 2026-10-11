@@ -22,6 +22,8 @@ internal sealed class NativeEngineInstance : IDisposable
     private bool _initialized;
 
     /* ── Delegate types matching native function signatures ───── */
+    // File paths are passed as UTF-16 to the ...W exports, so files with any name (Hebrew, emoji...)
+    // work; the ANSI exports could only open names in the system code page.
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate int InitDelegate();
 
@@ -31,18 +33,18 @@ internal sealed class NativeEngineInstance : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate int GetVersionDelegate(StringBuilder buffer, int bufLen);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int AnalyzeFileDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref NativeMethods.MP3G_AnalysisResult result,
         int ignoreTags, int recalcTags);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate int AlbumInitDelegate();
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int AlbumAnalyzeFileDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref NativeMethods.MP3G_AnalysisResult result,
         int ignoreTags, int recalcTags);
 
@@ -52,39 +54,39 @@ internal sealed class NativeEngineInstance : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void AlbumFinishDelegate();
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int ApplyGainDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         int gainChange, int preserveTimestamp);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int ApplyTrackGainDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         double targetDb, int preserveTimestamp);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int UndoGainDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         int preserveTimestamp);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int ReadTagsDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref NativeMethods.MP3G_TagInfo tagInfo);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int WriteTagsDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref NativeMethods.MP3G_AnalysisResult result,
         double targetDb, int haveUndo, int undoLeft, int undoRight,
         int preserveTimestamp);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int RemoveTagsDelegate(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         int preserveTimestamp);
 
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public delegate int GetLastErrorDelegate(StringBuilder buffer, int bufLen);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -170,18 +172,18 @@ internal sealed class NativeEngineInstance : IDisposable
         Init = GetExport<InitDelegate>("MP3G_Init");
         Shutdown = GetExport<ShutdownDelegate>("MP3G_Shutdown");
         GetVersion = GetExport<GetVersionDelegate>("MP3G_GetVersion");
-        AnalyzeFile = GetExport<AnalyzeFileDelegate>("MP3G_AnalyzeFile");
+        AnalyzeFile = GetExport<AnalyzeFileDelegate>("MP3G_AnalyzeFileW");
         AlbumInit = GetExport<AlbumInitDelegate>("MP3G_AlbumInit");
-        AlbumAnalyzeFile = GetExport<AlbumAnalyzeFileDelegate>("MP3G_AlbumAnalyzeFile");
+        AlbumAnalyzeFile = GetExport<AlbumAnalyzeFileDelegate>("MP3G_AlbumAnalyzeFileW");
         AlbumGetResult = GetExport<AlbumGetResultDelegate>("MP3G_AlbumGetResult");
         AlbumFinish = GetExport<AlbumFinishDelegate>("MP3G_AlbumFinish");
-        ApplyGain = GetExport<ApplyGainDelegate>("MP3G_ApplyGain");
-        ApplyTrackGain = GetExport<ApplyTrackGainDelegate>("MP3G_ApplyTrackGain");
-        UndoGain = GetExport<UndoGainDelegate>("MP3G_UndoGain");
-        ReadTags = GetExport<ReadTagsDelegate>("MP3G_ReadTags");
-        WriteTags = GetExport<WriteTagsDelegate>("MP3G_WriteTags");
-        RemoveTags = GetExport<RemoveTagsDelegate>("MP3G_RemoveTags");
-        GetLastError = GetExport<GetLastErrorDelegate>("MP3G_GetLastError");
+        ApplyGain = GetExport<ApplyGainDelegate>("MP3G_ApplyGainW");
+        ApplyTrackGain = GetExport<ApplyTrackGainDelegate>("MP3G_ApplyTrackGainW");
+        UndoGain = GetExport<UndoGainDelegate>("MP3G_UndoGainW");
+        ReadTags = GetExport<ReadTagsDelegate>("MP3G_ReadTagsW");
+        WriteTags = GetExport<WriteTagsDelegate>("MP3G_WriteTagsW");
+        RemoveTags = GetExport<RemoveTagsDelegate>("MP3G_RemoveTagsW");
+        GetLastError = GetExport<GetLastErrorDelegate>("MP3G_GetLastErrorW");
         SetProgressCallback = GetExport<SetProgressCallbackDelegate>("MP3G_SetProgressCallback");
     }
 

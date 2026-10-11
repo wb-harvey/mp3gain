@@ -98,6 +98,7 @@ struct MP3GainTagInfo *globalTagInfoHack = NULL;
 #endif
 
 #include "mp3gain.h"  /*jzitt*/
+#include "utf8_io.h"  /* Unicode file names (after the system headers) */
 
 
 #define HEADERSIZE 4
@@ -537,13 +538,17 @@ void fileTime(char *filename, timeAction action)
 
     if (action == storeTime) {
 #ifdef WIN32
-		outfh = CreateFile((LPCTSTR)filename,
+		/* filename is UTF-8 (see utf8_io.h): open it through the wide API */
+		wchar_t* wname = u8_to_wide(filename);
+		outfh = wname == NULL ? INVALID_HANDLE_VALUE :
+				CreateFileW(wname,
 							GENERIC_READ,
 							FILE_SHARE_READ,
 							NULL,
 							OPEN_EXISTING,
 							FILE_ATTRIBUTE_NORMAL,
 							NULL);
+		free(wname);
 		if (outfh != INVALID_HANDLE_VALUE) {
 			if (GetFileTime(outfh,&create_time,&access_time,&write_time))
 				timeSaved = !0;
@@ -557,13 +562,16 @@ void fileTime(char *filename, timeAction action)
     else {
         if (timeSaved) {
 #ifdef WIN32
-			outfh = CreateFile((LPCTSTR)filename,
+			wchar_t* wname = u8_to_wide(filename);
+			outfh = wname == NULL ? INVALID_HANDLE_VALUE :
+					CreateFileW(wname,
 						GENERIC_WRITE,
 						0,
 						NULL,
 						OPEN_EXISTING,
 						FILE_ATTRIBUTE_NORMAL,
 						NULL);
+			free(wname);
 			if (outfh != INVALID_HANDLE_VALUE) {
 				SetFileTime(outfh,&create_time,&access_time,&write_time);
 				CloseHandle(outfh);

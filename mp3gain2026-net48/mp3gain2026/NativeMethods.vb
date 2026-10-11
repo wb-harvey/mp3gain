@@ -3,6 +3,8 @@ Imports System.Text
 
 ''' <summary>
 ''' P/Invoke declarations for the mp3gain2026 native DLL.
+''' File paths go to the ...W exports as UTF-16, so files with any name (Hebrew, emoji...) work;
+''' the ANSI exports could only open names in the system code page.
 ''' </summary>
 Friend NotInheritable Class NativeMethods
 
@@ -66,9 +68,9 @@ Friend NotInheritable Class NativeMethods
     End Function
 
     ' ── Single File Analysis ──
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_AnalyzeFileW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_AnalyzeFile(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         ByRef result As MP3G_AnalysisResult,
         ignoreTags As Integer,
         recalcTags As Integer) As Integer
@@ -79,9 +81,9 @@ Friend NotInheritable Class NativeMethods
     Public Shared Function MP3G_AlbumInit() As Integer
     End Function
 
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_AlbumAnalyzeFileW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_AlbumAnalyzeFile(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         ByRef result As MP3G_AnalysisResult,
         ignoreTags As Integer,
         recalcTags As Integer) As Integer
@@ -98,36 +100,36 @@ Friend NotInheritable Class NativeMethods
     End Sub
 
     ' ── Gain Modification ──
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_ApplyGainW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_ApplyGain(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         gainChange As Integer,
         preserveTimestamp As Integer) As Integer
     End Function
 
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_ApplyTrackGainW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_ApplyTrackGain(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         targetDb As Double,
         preserveTimestamp As Integer) As Integer
     End Function
 
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_UndoGainW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_UndoGain(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         preserveTimestamp As Integer) As Integer
     End Function
 
     ' ── Tag Operations ──
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_ReadTagsW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_ReadTags(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         ByRef tagInfo As MP3G_TagInfo) As Integer
     End Function
 
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_WriteTagsW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_WriteTags(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         ByRef result As MP3G_AnalysisResult,
         targetDb As Double,
         haveUndo As Integer,
@@ -136,16 +138,16 @@ Friend NotInheritable Class NativeMethods
         preserveTimestamp As Integer) As Integer
     End Function
 
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Ansi)>
+    <DllImport(DllName, EntryPoint:="MP3G_RemoveTagsW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_RemoveTags(
-        <MarshalAs(UnmanagedType.LPStr)> filePath As String,
+        <MarshalAs(UnmanagedType.LPWStr)> filePath As String,
         preserveTimestamp As Integer) As Integer
     End Function
 
     ' ── Error Reporting ──
-    <DllImport(DllName, CallingConvention:=CallingConvention.Cdecl)>
+    <DllImport(DllName, EntryPoint:="MP3G_GetLastErrorW", CallingConvention:=CallingConvention.Cdecl, CharSet:=CharSet.Unicode)>
     Public Shared Function MP3G_GetLastError(
-        <MarshalAs(UnmanagedType.LPStr)> buffer As StringBuilder,
+        <MarshalAs(UnmanagedType.LPWStr)> buffer As StringBuilder,
         bufLen As Integer) As Integer
     End Function
 

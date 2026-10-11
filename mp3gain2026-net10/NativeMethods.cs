@@ -67,9 +67,9 @@ internal static class NativeMethods
         int bufLen);
 
     /* ── Single File Analysis ─────────────────────────────────── */
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_AnalyzeFileW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_AnalyzeFile(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref MP3G_AnalysisResult result,
         int ignoreTags,
         int recalcTags);
@@ -78,9 +78,9 @@ internal static class NativeMethods
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern int MP3G_AlbumInit();
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_AlbumAnalyzeFileW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_AlbumAnalyzeFile(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref MP3G_AnalysisResult result,
         int ignoreTags,
         int recalcTags);
@@ -94,32 +94,32 @@ internal static class NativeMethods
     public static extern void MP3G_AlbumFinish();
 
     /* ── Gain Modification ────────────────────────────────────── */
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_ApplyGainW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_ApplyGain(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         int gainChange,
         int preserveTimestamp);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_ApplyTrackGainW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_ApplyTrackGain(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         double targetDb,
         int preserveTimestamp);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_UndoGainW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_UndoGain(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         int preserveTimestamp);
 
     /* ── Tag Operations ───────────────────────────────────────── */
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_ReadTagsW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_ReadTags(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref MP3G_TagInfo tagInfo);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_WriteTagsW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_WriteTags(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         ref MP3G_AnalysisResult result,
         double targetDb,
         int haveUndo,
@@ -127,15 +127,15 @@ internal static class NativeMethods
         int undoRight,
         int preserveTimestamp);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "MP3G_RemoveTagsW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_RemoveTags(
-        [MarshalAs(UnmanagedType.LPStr)] string filePath,
+        [MarshalAs(UnmanagedType.LPWStr)] string filePath,
         int preserveTimestamp);
 
     /* ── Error Reporting ──────────────────────────────────────── */
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(DllName, EntryPoint = "MP3G_GetLastErrorW", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     public static extern int MP3G_GetLastError(
-        [MarshalAs(UnmanagedType.LPStr)] System.Text.StringBuilder buffer,
+        [MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder buffer,
         int bufLen);
 
     /* ── Progress ─────────────────────────────────────────────────── */

@@ -28,3 +28,14 @@ EXPORTS
     ; Error / Progress
     MP3G_GetLastError       @50
     MP3G_SetProgressCallback @51
+    MP3G_GetLastErrorW      @52
+
+    ; Unicode (UTF-16) path versions
+    MP3G_AnalyzeFileW       @60
+    MP3G_AlbumAnalyzeFileW  @61
+    MP3G_ApplyGainW         @62
+    MP3G_ApplyTrackGainW    @63
+    MP3G_UndoGainW          @64
+    MP3G_ReadTagsW          @65
+    MP3G_WriteTagsW         @66
+    MP3G_RemoveTagsW        @67

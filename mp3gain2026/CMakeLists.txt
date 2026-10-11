@@ -14,6 +14,7 @@ set(LEGACY_SOURCES
     legacy/apetag.c
     legacy/id3tag.c
     legacy/rg_error.c
+    legacy/utf8_io.c
     legacy/mpglibDBL/common.c
     legacy/mpglibDBL/dct64_i386.c
     legacy/mpglibDBL/decode_i386.c

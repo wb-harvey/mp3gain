@@ -48,6 +48,7 @@
 #include "apetag.h"
 #include "id3tag.h"
 #include "mp3gain.h"
+#include "utf8_io.h"  /* Unicode file names (after the system headers) */
 
 
 #ifdef WIN32

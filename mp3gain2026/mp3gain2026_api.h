@@ -13,6 +13,8 @@
 #ifndef MP3GAIN2026_API_H
 #define MP3GAIN2026_API_H
 
+#include <wchar.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -115,8 +117,42 @@ MP3G_API int  MP3G_WriteTags(const char* filePath,
 MP3G_API int  MP3G_RemoveTags(const char* filePath,
                               int preserveTimestamp);
 
+/* ── Unicode (UTF-16) path versions ───────────────────────────────
+ * The functions above take ANSI paths (the system code page), which can't name every file. These take
+ * UTF-16 paths (wchar_t*, .NET's string / LPWStr) and work with any file name. */
+MP3G_API int  MP3G_AnalyzeFileW(const wchar_t* filePath,
+                                MP3G_AnalysisResult* result,
+                                int ignoreTags,
+                                int recalcTags);
+MP3G_API int  MP3G_AlbumAnalyzeFileW(const wchar_t* filePath,
+                                     MP3G_AnalysisResult* result,
+                                     int ignoreTags,
+                                     int recalcTags);
+MP3G_API int  MP3G_ApplyGainW(const wchar_t* filePath,
+                              int gainChange,
+                              int preserveTimestamp);
+MP3G_API int  MP3G_ApplyTrackGainW(const wchar_t* filePath,
+                                   double targetDb,
+                                   int preserveTimestamp);
+MP3G_API int  MP3G_UndoGainW(const wchar_t* filePath,
+                             int preserveTimestamp);
+MP3G_API int  MP3G_ReadTagsW(const wchar_t* filePath,
+                             MP3G_TagInfo* tagInfo);
+MP3G_API int  MP3G_WriteTagsW(const wchar_t* filePath,
+                              const MP3G_AnalysisResult* result,
+                              double targetDb,
+                              int haveUndo,
+                              int undoLeft,
+                              int undoRight,
+                              int preserveTimestamp);
+MP3G_API int  MP3G_RemoveTagsW(const wchar_t* filePath,
+                               int preserveTimestamp);
+
 /* ── Error Reporting ──────────────────────────────────────────── */
+/* MP3G_GetLastError returns the message in the system code page; MP3G_GetLastErrorW as UTF-16
+   (use it when the message can contain a file name outside the code page) */
 MP3G_API int  MP3G_GetLastError(char* buffer, int bufLen);
+MP3G_API int  MP3G_GetLastErrorW(wchar_t* buffer, int bufLen);
 
 /* ── Progress ─────────────────────────────────────────────────── */
 MP3G_API void MP3G_SetProgressCallback(MP3G_ProgressCallback callback,

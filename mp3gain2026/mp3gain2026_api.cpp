@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <string>
 
 #include "mp3gain2026_api.h"
 
@@ -62,6 +63,40 @@ static void ClearLastError() {
     g_lastError[0] = '\0';
 }
 
+/* ── Unicode paths ────────────────────────────────────────────────
+ * The legacy code takes file names as char*; it now gets UTF-8 and opens files through the wide
+ * Windows functions (legacy/utf8_io.h), so any name works. The ...W exports take UTF-16 paths; the
+ * original exports keep taking ANSI (system code page) paths, converted here, for existing callers. */
+
+static bool ToUtf8(const wchar_t* wide, std::string& utf8) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return false;
+    utf8.resize(n);
+    if (WideCharToMultiByte(CP_UTF8, 0, wide, -1, &utf8[0], n, NULL, NULL) != n) return false;
+    utf8.resize(n - 1); /* drop the terminator that n counts */
+    return true;
+}
+
+static bool AnsiToUtf8(const char* ansi, std::string& utf8) {
+    int n = MultiByteToWideChar(CP_ACP, 0, ansi, -1, NULL, 0);
+    if (n <= 0) return false;
+    std::wstring wide(n, L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, ansi, -1, &wide[0], n) != n) return false;
+    return ToUtf8(wide.c_str(), utf8);
+}
+
+/* Converts the caller's path (wide = UTF-16, else ANSI) to UTF-8, or returns MP3G_ERR_INVALIDARG */
+#define WITH_UTF8_PATH(path, isWide, call)                                                     \
+    do {                                                                                       \
+        if (!(path)) return MP3G_ERR_INVALIDARG;                                               \
+        std::string u8path_;                                                                   \
+        bool ok_ = (isWide) ? ToUtf8((const wchar_t*)(path), u8path_)                         \
+                            : AnsiToUtf8((const char*)(path), u8path_);                       \
+        if (!ok_) { SetLastErrorMsg("The file path could not be converted"); return MP3G_ERR_INVALIDARG; } \
+        const char* u8_ = u8path_.c_str();                                                     \
+        return call;                                                                           \
+    } while (0)
+
 /* ── Library Lifecycle ────────────────────────────────────────── */
 
 MP3G_API int MP3G_Init(void) {
@@ -104,10 +139,10 @@ MP3G_API int MP3G_GetVersion(char* buffer, int bufLen) {
 extern "C" struct MP3GainTagInfo *globalTagInfoHack;
 extern "C" int __cdecl mp3gain_main(int argc, char **argv);
 
-MP3G_API int MP3G_AnalyzeFile(const char* filePath,
-                               MP3G_AnalysisResult* result,
-                               int ignoreTags,
-                               int recalcTags) {
+static int AnalyzeFileU8(const char* filePath,
+                         MP3G_AnalysisResult* result,
+                         int ignoreTags,
+                         int recalcTags) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath || !result) return MP3G_ERR_INVALIDARG;
 
@@ -187,14 +222,6 @@ MP3G_API int MP3G_AlbumInit(void) {
     return MP3G_OK;
 }
 
-MP3G_API int MP3G_AlbumAnalyzeFile(const char* filePath,
-                                     MP3G_AnalysisResult* result,
-                                     int ignoreTags,
-                                     int recalcTags) {
-    /* For album mode, each file is analyzed and contributes to the album stats */
-    return MP3G_AnalyzeFile(filePath, result, ignoreTags, recalcTags);
-}
-
 MP3G_API int MP3G_AlbumGetResult(double* albumGain, double* albumPeak) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!albumGain || !albumPeak) return MP3G_ERR_INVALIDARG;
@@ -212,9 +239,9 @@ MP3G_API void MP3G_AlbumFinish(void) {
 
 /* ── Gain Modification ────────────────────────────────────────── */
 
-MP3G_API int MP3G_ApplyGain(const char* filePath,
-                             int gainChange,
-                             int preserveTimestamp) {
+static int ApplyGainU8(const char* filePath,
+                       int gainChange,
+                       int preserveTimestamp) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath) return MP3G_ERR_INVALIDARG;
     if (gainChange == 0) return MP3G_OK;
@@ -256,15 +283,15 @@ MP3G_API int MP3G_ApplyGain(const char* filePath,
     return ret;
 }
 
-MP3G_API int MP3G_ApplyTrackGain(const char* filePath,
-                                  double targetDb,
-                                  int preserveTimestamp) {
+static int ApplyTrackGainU8(const char* filePath,
+                            double targetDb,
+                            int preserveTimestamp) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath) return MP3G_ERR_INVALIDARG;
 
     /* First analyze the file to get current gain */
     MP3G_AnalysisResult analysis;
-    int ret = MP3G_AnalyzeFile(filePath, &analysis, 0, 0);
+    int ret = AnalyzeFileU8(filePath, &analysis, 0, 0);
     if (ret != MP3G_OK) return ret;
 
     /* Calculate required change in quarter-dB steps (mp3gain's unit) */
@@ -273,11 +300,13 @@ MP3G_API int MP3G_ApplyTrackGain(const char* filePath,
 
     if (gainChange == 0) return MP3G_OK;
 
-    return MP3G_ApplyGain(filePath, gainChange, preserveTimestamp);
+    return ApplyGainU8(filePath, gainChange, preserveTimestamp);
 }
 
-MP3G_API int MP3G_UndoGain(const char* filePath,
-                            int preserveTimestamp) {
+static int ReadTagsU8(const char* filePath, MP3G_TagInfo* tagInfo);
+
+static int UndoGainU8(const char* filePath,
+                      int preserveTimestamp) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath) return MP3G_ERR_INVALIDARG;
 
@@ -285,7 +314,7 @@ MP3G_API int MP3G_UndoGain(const char* filePath,
 
     /* Read existing tags to find undo info */
     MP3G_TagInfo tagInfo;
-    int ret = MP3G_ReadTags(filePath, &tagInfo);
+    int ret = ReadTagsU8(filePath, &tagInfo);
     if (ret != MP3G_OK) return ret;
 
     if (!tagInfo.haveUndo) {
@@ -328,8 +357,8 @@ MP3G_API int MP3G_UndoGain(const char* filePath,
 
 /* ── Tag Operations ───────────────────────────────────────────── */
 
-MP3G_API int MP3G_ReadTags(const char* filePath,
-                            MP3G_TagInfo* tagInfo) {
+static int ReadTagsU8(const char* filePath,
+                      MP3G_TagInfo* tagInfo) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath || !tagInfo) return MP3G_ERR_INVALIDARG;
 
@@ -379,13 +408,13 @@ MP3G_API int MP3G_ReadTags(const char* filePath,
     return MP3G_OK;
 }
 
-MP3G_API int MP3G_WriteTags(const char* filePath,
-                             const MP3G_AnalysisResult* result,
-                             double targetDb,
-                             int haveUndo,
-                             int undoLeft,
-                             int undoRight,
-                             int preserveTimestamp) {
+static int WriteTagsU8(const char* filePath,
+                       const MP3G_AnalysisResult* result,
+                       double targetDb,
+                       int haveUndo,
+                       int undoLeft,
+                       int undoRight,
+                       int preserveTimestamp) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath || !result) return MP3G_ERR_INVALIDARG;
 
@@ -445,8 +474,8 @@ MP3G_API int MP3G_WriteTags(const char* filePath,
     return (ret == 0) ? MP3G_ERR_FILEWRITE : MP3G_OK;
 }
 
-MP3G_API int MP3G_RemoveTags(const char* filePath,
-                              int preserveTimestamp) {
+static int RemoveTagsU8(const char* filePath,
+                        int preserveTimestamp) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!filePath) return MP3G_ERR_INVALIDARG;
 
@@ -459,11 +488,87 @@ MP3G_API int MP3G_RemoveTags(const char* filePath,
     return MP3G_OK;
 }
 
+/* ── Path exports: ANSI (existing callers) and UTF-16 (...W) ──── */
+
+MP3G_API int MP3G_AnalyzeFile(const char* filePath, MP3G_AnalysisResult* result, int ignoreTags, int recalcTags) {
+    WITH_UTF8_PATH(filePath, false, AnalyzeFileU8(u8_, result, ignoreTags, recalcTags));
+}
+MP3G_API int MP3G_AnalyzeFileW(const wchar_t* filePath, MP3G_AnalysisResult* result, int ignoreTags, int recalcTags) {
+    WITH_UTF8_PATH(filePath, true, AnalyzeFileU8(u8_, result, ignoreTags, recalcTags));
+}
+
+MP3G_API int MP3G_AlbumAnalyzeFile(const char* filePath, MP3G_AnalysisResult* result, int ignoreTags, int recalcTags) {
+    /* For album mode, each file is analyzed and contributes to the album stats */
+    return MP3G_AnalyzeFile(filePath, result, ignoreTags, recalcTags);
+}
+MP3G_API int MP3G_AlbumAnalyzeFileW(const wchar_t* filePath, MP3G_AnalysisResult* result, int ignoreTags, int recalcTags) {
+    return MP3G_AnalyzeFileW(filePath, result, ignoreTags, recalcTags);
+}
+
+MP3G_API int MP3G_ApplyGain(const char* filePath, int gainChange, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, false, ApplyGainU8(u8_, gainChange, preserveTimestamp));
+}
+MP3G_API int MP3G_ApplyGainW(const wchar_t* filePath, int gainChange, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, true, ApplyGainU8(u8_, gainChange, preserveTimestamp));
+}
+
+MP3G_API int MP3G_ApplyTrackGain(const char* filePath, double targetDb, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, false, ApplyTrackGainU8(u8_, targetDb, preserveTimestamp));
+}
+MP3G_API int MP3G_ApplyTrackGainW(const wchar_t* filePath, double targetDb, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, true, ApplyTrackGainU8(u8_, targetDb, preserveTimestamp));
+}
+
+MP3G_API int MP3G_UndoGain(const char* filePath, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, false, UndoGainU8(u8_, preserveTimestamp));
+}
+MP3G_API int MP3G_UndoGainW(const wchar_t* filePath, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, true, UndoGainU8(u8_, preserveTimestamp));
+}
+
+MP3G_API int MP3G_ReadTags(const char* filePath, MP3G_TagInfo* tagInfo) {
+    WITH_UTF8_PATH(filePath, false, ReadTagsU8(u8_, tagInfo));
+}
+MP3G_API int MP3G_ReadTagsW(const wchar_t* filePath, MP3G_TagInfo* tagInfo) {
+    WITH_UTF8_PATH(filePath, true, ReadTagsU8(u8_, tagInfo));
+}
+
+MP3G_API int MP3G_WriteTags(const char* filePath, const MP3G_AnalysisResult* result, double targetDb,
+                             int haveUndo, int undoLeft, int undoRight, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, false, WriteTagsU8(u8_, result, targetDb, haveUndo, undoLeft, undoRight, preserveTimestamp));
+}
+MP3G_API int MP3G_WriteTagsW(const wchar_t* filePath, const MP3G_AnalysisResult* result, double targetDb,
+                              int haveUndo, int undoLeft, int undoRight, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, true, WriteTagsU8(u8_, result, targetDb, haveUndo, undoLeft, undoRight, preserveTimestamp));
+}
+
+MP3G_API int MP3G_RemoveTags(const char* filePath, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, false, RemoveTagsU8(u8_, preserveTimestamp));
+}
+MP3G_API int MP3G_RemoveTagsW(const wchar_t* filePath, int preserveTimestamp) {
+    WITH_UTF8_PATH(filePath, true, RemoveTagsU8(u8_, preserveTimestamp));
+}
+
 /* ── Error Reporting ──────────────────────────────────────────── */
 
+/* The message is kept as UTF-8 (it can contain a file name); this returns it in the system code page */
 MP3G_API int MP3G_GetLastError(char* buffer, int bufLen) {
     if (!buffer || bufLen < 1) return MP3G_ERR_INVALIDARG;
-    strncpy_s(buffer, bufLen, g_lastError, _TRUNCATE);
+    wchar_t wide[2048];
+    if (MultiByteToWideChar(CP_UTF8, 0, g_lastError, -1, wide, 2048) <= 0 ||
+        WideCharToMultiByte(CP_ACP, 0, wide, -1, buffer, bufLen, NULL, NULL) <= 0)
+        strncpy_s(buffer, bufLen, g_lastError, _TRUNCATE);
+    return MP3G_OK;
+}
+
+MP3G_API int MP3G_GetLastErrorW(wchar_t* buffer, int bufLen) {
+    if (!buffer || bufLen < 1) return MP3G_ERR_INVALIDARG;
+    if (MultiByteToWideChar(CP_UTF8, 0, g_lastError, -1, buffer, bufLen) <= 0) {
+        /* Not valid UTF-8, or too long for the buffer: copy what fits, byte for byte */
+        int i = 0;
+        for (; i < bufLen - 1 && g_lastError[i]; i++) buffer[i] = (unsigned char)g_lastError[i];
+        buffer[i] = L'\0';
+    }
     return MP3G_OK;
 }
 
