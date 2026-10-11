@@ -989,7 +989,7 @@ public partial class MainForm : Form
 			}
 			return;
 		}
-		List<Mp3FileInfo> targets = _files.ToList();
+		List<Mp3FileInfo> targets = GetSelectedOrAllFiles(); // the selection, like the other operations (was every file)
 		if (targets.Count == 0)
 		{
 			MessageBox.Show("No files to apply gain to.\nPlease add files first.", "MP3Gain 2026", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);

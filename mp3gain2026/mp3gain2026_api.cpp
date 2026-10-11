@@ -267,8 +267,10 @@ static int AnalyzeFileU8(const char* filePath,
     struct MP3GainTagInfo* tag = &localTag;
     result->trackGain = tag->trackGain;
     result->trackPeak = tag->trackPeak;
-    result->albumGain = tag->albumGain;
-    result->albumPeak = tag->albumPeak;
+    /* Album gain isn't computed (each call analyses one file): it is reported as 0, rather than whatever
+       album value an old tag held, which belonged to some earlier album analysis */
+    result->albumGain = 0.0;
+    result->albumPeak = 0.0;
     result->minGlobalGain = tag->minGain;
     result->maxGlobalGain = tag->maxGain;
 
@@ -303,10 +305,10 @@ MP3G_API int MP3G_AlbumGetResult(double* albumGain, double* albumPeak) {
     if (!g_initialized) return MP3G_ERR_GENERIC;
     if (!albumGain || !albumPeak) return MP3G_ERR_INVALIDARG;
 
-    EnterCriticalSection(&g_cs);
-    *albumGain = GetAlbumGain();
-    *albumPeak = 0.0; /* Album peak must be tracked separately */
-    LeaveCriticalSection(&g_cs);
+    /* Album gain isn't computed: every analysis resets the album totals, so GetAlbumGain() returned the
+       last decoded file's gain, or GAIN_NOT_ENOUGH_SAMPLES (-24601) as a "gain". It is reported as 0. */
+    *albumGain = 0.0;
+    *albumPeak = 0.0;
     return MP3G_OK;
 }
 

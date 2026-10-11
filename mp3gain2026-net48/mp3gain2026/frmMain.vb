@@ -807,7 +807,7 @@ Public Class frmMain
     Private Async Sub OnApplyGain(sender As Object, e As EventArgs)
         If _engine Is Nothing OrElse _isProcessing Then Return
 
-        Dim targets = _files.ToList()
+        Dim targets = GetSelectedOrAllFiles() ' the selection, like the other operations (was every file)
         If targets.Count = 0 Then
             MessageBox.Show("No files to apply gain to." & vbCrLf & "Please add files first.",
                 "MP3Gain 2026", MessageBoxButtons.OK, MessageBoxIcon.Information)
