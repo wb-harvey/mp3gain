@@ -480,3 +480,9 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# CMake build folders of the native DLL (build_x86, build_x64, build_unicode_x86...)
+mp3gain2026/build_*/
+
+# Native DLLs the .NET 10 app ships (copied from the CMake build)
+mp3gain2026-net10/runtimes/
